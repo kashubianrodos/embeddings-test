@@ -26,6 +26,9 @@ supports both a speed benchmark and a cross-lingual semantic accuracy test.
    for each EN sentence, is its PL translation the nearest PL vector (top-1
    accuracy, both directions)? Also reports mean cosine similarity of true pairs
    vs. non-pairs and the separation margin.
+3. **`scripts/speed_test.py`** — detailed per-model speed test: times each
+   embedding call individually (after warmup) and reports mean / median /
+   p95 / min / max latency and throughput (texts/s).
 
 ## Usage
 
@@ -47,6 +50,7 @@ pip install -r requirements.txt
 
 python scripts/benchmark.py
 python scripts/semantic_test.py
+python scripts/speed_test.py
 ```
 
 Reports land in `output/` as timestamped Markdown files.

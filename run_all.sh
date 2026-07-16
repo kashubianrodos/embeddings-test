@@ -27,4 +27,7 @@ python scripts/benchmark.py
 echo "== Running semantic test =="
 python scripts/semantic_test.py
 
+echo "== Running speed test =="
+python scripts/speed_test.py
+
 echo "== Done. Reports in ./output =="
