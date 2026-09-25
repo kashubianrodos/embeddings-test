@@ -33,15 +33,28 @@ load_env_file() {
   done < "$f"
 }
 
+# vast/.env + secret aliases. Runs whenever common.sh is sourced, so standalone scripts
+# (destroy.sh, fetch_results.sh, ssh.sh) authenticate exactly like bench.sh does.
+load_local_env() {
+  load_env_file "$VAST_DIR/.env"
+  # secrets: accept the names used in vast/.env as well as the canonical ones
+  if [ -z "${VAST_API_KEY:-}" ] && [ -n "${VAST_AI_API_KEY:-}" ]; then export VAST_API_KEY="$VAST_AI_API_KEY"; fi
+  if [ -z "${HF_TOKEN:-}" ] && [ -n "${HF_KEY:-}" ]; then export HF_TOKEN="$HF_KEY"; fi
+  return 0
+}
+
+api_key_source() {
+  if [ -n "${VAST_API_KEY:-}" ]; then echo "VAST_API_KEY env (vast/.env or shell)"
+  elif [ -s "${XDG_CONFIG_HOME:-$HOME/.config}/vastai/vast_api_key" ]; then echo "$HOME/.config/vastai/vast_api_key"
+  elif [ -s "$HOME/.vast_api_key" ]; then echo "$HOME/.vast_api_key (legacy)"
+  else echo "NONE — set VAST_AI_API_KEY in vast/.env or run: vastai set api-key <KEY>"; fi
+}
+
 # resolve_config <ollama|vllm>: every knob gets a value; nothing is hidden in other scripts.
 resolve_config() {
   MODE="$1"
   case "$MODE" in ollama|vllm) ;; *) die "usage: mode must be 'ollama' or 'vllm' (got '$MODE')" ;; esac
-  load_env_file "$VAST_DIR/.env"
-
-  # secrets: accept the names used in vast/.env as well as the canonical ones
-  if [ -z "${VAST_API_KEY:-}" ] && [ -n "${VAST_AI_API_KEY:-}" ]; then export VAST_API_KEY="$VAST_AI_API_KEY"; fi
-  if [ -z "${HF_TOKEN:-}" ] && [ -n "${HF_KEY:-}" ]; then export HF_TOKEN="$HF_KEY"; fi
+  load_local_env
 
   REPO_URL="${REPO_URL:-https://github.com/kashubianrodos/embeddings-test.git}"
   REPO_BRANCH="${REPO_BRANCH:-$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}"
@@ -134,7 +147,21 @@ remote_env_b64() {
   } | base64 | tr -d '\n=' | tr '+/' '-_'
 }
 
-vast() { command vastai "$@"; }
+# vast: the vastai CLI. With VAST_DEBUG=1 every call, its exit code and (truncated) output go
+# to vast/.debug.log. BENCH_ENV_B64 is redacted there because it carries HF_TOKEN.
+vast() {
+  if [ "${VAST_DEBUG:-0}" != 1 ]; then command vastai "$@"; return; fi
+  local out err rc t0
+  out=$(mktemp); err=$(mktemp); t0=$(date +%s)
+  command vastai "$@" >"$out" 2>"$err"; rc=$?
+  {
+    printf '\n[%s] $ vastai %s\n    rc=%s  %ss\n' "$(date '+%F %T')" "$*" "$rc" "$(( $(date +%s) - t0 ))" \
+      | sed 's/BENCH_ENV_B64=[^ ]*/BENCH_ENV_B64=<redacted>/'
+    printf -- '--- stdout ---\n'; head -c 3000 "$out"; printf '\n--- stderr ---\n'; head -c 2000 "$err"; printf '\n'
+  } >> "$VAST_DIR/.debug.log"
+  cat "$out"; cat "$err" >&2; rm -f "$out" "$err"
+  return $rc
+}
 
 current_id() {
   if [ -n "${1:-}" ]; then echo "$1"; return; fi
@@ -142,8 +169,14 @@ current_id() {
   cat "$STATE_ID"
 }
 
-instance_status() {  # prints actual_status, "gone", or "unknown" (API error)
-  vast show instance "$1" --raw 2>/dev/null </dev/null | python3 "$TOOL" status
+instance_status() {  # prints actual_status, "gone" (positive evidence only), or "unknown"
+  vast show instance "$1" --raw 2>&1 </dev/null | python3 "$TOOL" status
+}
+# instance_gone <id>: 0 if the instance no longer exists. Two independent checks: the
+# single-instance lookup (null / 404) OR absence from the full `show instances` list.
+instance_gone() {
+  [ "$(instance_status "$1")" = gone ] && return 0
+  [ "$(vast show instances --raw 2>&1 </dev/null | python3 "$TOOL" in-list "$1")" = absent ]
 }
 instance_msg() {     # vast's status_msg (why a container exited / is loading)
   vast show instance "$1" --raw 2>/dev/null </dev/null | python3 "$TOOL" status --field status_msg
@@ -181,3 +214,5 @@ remote() {  # remote <id> <command string>
   # shellcheck disable=SC2086
   ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USERHOST" "$@"
 }
+
+load_local_env

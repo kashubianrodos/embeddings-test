@@ -248,5 +248,10 @@ Shared flags: `--backend ollama|openai --model … --base-url … --think --num-
 - **vLLM out of memory**: lower `VLLM_MAX_MODEL_LEN` or `VLLM_GPU_MEM_UTIL`.
 - **Ollama slow or partly offloaded to CPU**: `ollama.log` shows the layer split. Lower `OLLAMA_NUM_PARALLEL` or
   `OLLAMA_CONTEXT_LENGTH`, or set `OLLAMA_KV_CACHE_TYPE=q8_0`.
+- **Debugging any vast call**: `VAST_DEBUG=1 ./vast/bench.sh …` (or `destroy.sh`, `fetch_results.sh`) logs every
+  `vastai` call with its exit code and output to `vast/.debug.log`. The env blob holding `HF_TOKEN` is redacted.
+- **`destroy.sh` says "still listed"**: each check prints what vast answered for both `show instance` and
+  `show instances`. `API error 401` means the script has no valid API key. It reads `VAST_AI_API_KEY` from
+  `vast/.env`, or the key saved by `vastai set api-key`.
 - **"COULD NOT CONFIRM DESTROY"** or **"Destroy did not complete"**: check `vastai show instances` or the web console right away. Storage bills even
   while an instance is stopped.

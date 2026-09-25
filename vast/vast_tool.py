@@ -15,10 +15,7 @@ import sys
 import time
 
 
-def _load_any(text):
-    text = text.strip()
-    if not text:
-        return None
+def _load_one(text):
     try:
         return json.loads(text)
     except ValueError:
@@ -26,6 +23,52 @@ def _load_any(text):
             return ast.literal_eval(text)
         except (ValueError, SyntaxError):
             return None
+
+
+def _load_any(text):
+    """Parse CLI output that may mix JSON with warning lines (stdout+stderr merged)."""
+    text = text.strip()
+    if not text:
+        return None
+    d = _load_one(text)
+    if d is not None:
+        return d
+    for open_c, close_c in (("{", "}"), ("[", "]")):
+        i, j = text.find(open_c), text.rfind(close_c)
+        if 0 <= i < j:
+            d = _load_one(text[i:j + 1])
+            if d is not None:
+                return d
+    for line in reversed(text.splitlines()):  # e.g. a JSON error object on its own line
+        d = _load_one(line.strip())
+        if d is not None:
+            return d
+    return None
+
+
+GONE_MSGS = ("not found", "no longer exists", "does not exist", "no such instance")
+
+
+def classify_instance(d):
+    """Map `vastai show instance --raw` output (stdout+stderr) to a status word.
+    'gone' only on positive evidence; API trouble is 'unknown', never 'gone'."""
+    if d is None:
+        return "unknown", "no parseable output"
+    if isinstance(d, dict) and d.get("error"):
+        msg = str(d.get("msg", ""))
+        if d.get("status_code") in (404, 410) or any(m in msg.lower() for m in GONE_MSGS):
+            return "gone", f"API error {d.get('status_code')}: {msg}"
+        return "unknown", f"API error {d.get('status_code')}: {msg}"
+    if isinstance(d, dict) and "instances" in d:
+        d = d["instances"]
+    if isinstance(d, list):
+        d = d[0] if d else None
+    if not isinstance(d, dict) or not d:
+        return "gone", "API returned no instance"
+    st = d.get("actual_status") or d.get("cur_state")
+    if "destroy" in str(d.get("intended_status", "")).lower() or "destroy" in str(st).lower():
+        return "gone", f"intended_status={d.get('intended_status')} actual_status={st}"
+    return (st or "unknown"), f"intended_status={d.get('intended_status')} status_msg={d.get('status_msg')}"
 
 
 def _num(v, default=None):
@@ -127,19 +170,33 @@ def cmd_rank(a):
 # ----------------------------------------------------------------------------- small helpers
 def cmd_status(a):
     d = _load_any(sys.stdin.read())
-    if d is None:                      # CLI/API error or empty output: don't conclude anything
-        print("unknown")
+    if a.field:
+        if isinstance(d, dict) and isinstance(d.get("instances"), dict):
+            d = d["instances"]
+        v = d.get(a.field) if isinstance(d, dict) else None
+        print("" if v is None else v)
         return 0
-    if isinstance(d, dict) and "instances" in d:
-        d = d["instances"]
-    if isinstance(d, list):
-        d = d[0] if d else None
-    if not isinstance(d, dict) or not d:
-        print("gone")                  # explicit {"instances": null} / empty list
-    else:
-        v = d.get(a.field) if a.field else d.get("actual_status")
-        print(v if v not in (None, "") else ("" if a.field else "unknown"))
+    status, why = classify_instance(d)
+    print(f"{status}\t{why}" if a.why else status)
     return 0
+
+
+def cmd_in_list(a):
+    """`vastai show instances --raw` on stdin -> present / absent / unknown for one id."""
+    d = _load_any(sys.stdin.read())
+
+    def out(word, why):
+        print(f"{word}\t{why}" if a.why else word)
+        return 0
+    if isinstance(d, dict) and d.get("error"):
+        return out("unknown", f"API error {d.get('status_code')}: {d.get('msg')}")
+    if isinstance(d, dict):
+        d = d.get("instances")
+    if not isinstance(d, list):
+        return out("unknown", "no parseable instance list")
+    rows = [x for x in d if isinstance(x, dict)]
+    listing = ", ".join(f"{x.get('id')}:{x.get('actual_status')}" for x in rows) or "no instances"
+    return out("present" if str(a.id) in {str(x.get("id")) for x in rows} else "absent", f"account has: {listing}")
 
 
 def cmd_new_id(_a):
@@ -267,6 +324,10 @@ def main():
 
     st = sub.add_parser("status")
     st.add_argument("--field", default="", help="print this field instead of actual_status")
+    st.add_argument("--why", action="store_true", help="also print the reason (tab-separated)")
+    il = sub.add_parser("in-list")
+    il.add_argument("--why", action="store_true")
+    il.add_argument("id")
     sub.add_parser("new-id")
     g = sub.add_parser("get")
     g.add_argument("file")
@@ -280,7 +341,7 @@ def main():
     s.add_argument("--outcome", default="unknown")
 
     a = p.parse_args()
-    return {"rank": cmd_rank, "status": cmd_status, "new-id": cmd_new_id,
+    return {"rank": cmd_rank, "status": cmd_status, "in-list": cmd_in_list, "new-id": cmd_new_id,
             "get": cmd_get, "summary": cmd_summary}[a.cmd](a)
 
 
