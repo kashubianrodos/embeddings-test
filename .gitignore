@@ -1,6 +1,8 @@
 venv/
 output/
 output_vast/
-vast/.instance_id
-vast/.instance_mode
 __pycache__/
+# local vast.ai state + secrets (vast/.env.example IS committed)
+.env
+vast/.env
+vast/.instance_*

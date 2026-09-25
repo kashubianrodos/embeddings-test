@@ -1,0 +1,2 @@
+# Local machine only (not the instance): the vast.ai CLI. >=1.8.1 for `destroy instance -y`.
+vastai>=1.8.1

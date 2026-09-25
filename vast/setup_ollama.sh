@@ -1,45 +1,80 @@
 #!/usr/bin/env bash
-# Runs ON the vast.ai instance. Installs Ollama, pulls the GGUF model, prepares Python.
+# Runs ON the instance (image ollama/ollama:<pinned>, started by onstart.sh).
+# Starts Ollama, pulls the GGUF, prepares Python, smoke-tests, then touches /workspace/READY.
+# Idempotent: after a preemption/resume it reuses the downloaded model.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=vast/remote_lib.sh
+. vast/remote_lib.sh
+setup_guard
+mark setup_start mode=ollama
 
-MODEL="${LLM_MODEL:-hf.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:Q4_K}"
-export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-4}"    # max concurrent requests per model
+MODEL="${LLM_MODEL:?LLM_MODEL not set}"
+export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-4}"
 export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
+export OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-f16}"
 export OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_KEEP_ALIVE=1h
-export OLLAMA_MODELS="${OLLAMA_MODELS:-/workspace/ollama-models}"
+export OLLAMA_MODELS="${OLLAMA_MODELS:-$W/ollama-models}"
+export OLLAMA_HOST=127.0.0.1:11434
 
-echo "== Packages"
+# ollama/ollama ships no python3/curl; everything else is already in the image.
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq curl ca-certificates git python3 python3-venv zstd pciutils procps >/dev/null
+if ! command -v python3 >/dev/null || ! command -v curl >/dev/null || ! python3 -c 'import venv' 2>/dev/null; then
+  apt-get update -qq
+  apt-get install -y -qq curl ca-certificates git python3 python3-venv procps pciutils >/dev/null
+fi
+mark packages_done
 
-echo "== Ollama"
-command -v ollama >/dev/null || curl -fsSL https://ollama.com/install.sh | sh
+if ! command -v ollama >/dev/null; then  # only if someone overrides OLLAMA_IMAGE with a plain OS image
+  apt-get install -y -qq zstd >/dev/null
+  curl -fsSL https://ollama.com/install.sh | sh
+fi
 if ! pgrep -x ollama >/dev/null; then
-  nohup ollama serve > /workspace/ollama.log 2>&1 &
+  nohup ollama serve >> "$W/ollama.log" 2>&1 &
 fi
 for _ in $(seq 60); do curl -sf localhost:11434/api/version >/dev/null && break; sleep 2; done
-ollama --version
+curl -sf localhost:11434/api/version >/dev/null || { tail -n 50 "$W/ollama.log"; exit 1; }
+mark engine_ready version="$(ollama --version 2>/dev/null | awk '{print $NF}')"
 
-echo "== Pulling $MODEL (this is the slow part)"
+mark download_start
 ollama pull "$MODEL"
+mark download_done bytes="$(dir_bytes "$OLLAMA_MODELS")"
 
-echo "== Python env"
+# The name Ollama lists can differ in case/format from what we pulled; use the listed one.
+NAME=$(ollama list | awk 'NR>1{print $1}' | grep -iF "${MODEL##*:}" | head -n1 || true)
+[ -n "$NAME" ] || NAME=$(ollama list | awk 'NR>1{print $1}' | grep -iF "${MODEL%:*}" | head -n1 || true)
+[ -n "$NAME" ] || { echo "Pulled model not found in 'ollama list'"; ollama list; exit 1; }
+echo "Model as listed by Ollama: $NAME"
+
 [ -d venv ] || python3 -m venv venv
 ./venv/bin/pip install -q --upgrade pip
 ./venv/bin/pip install -q -r requirements-llm.txt
 
-cat > /workspace/bench.env <<ENV
+cat > "$W/bench.env" <<ENV
 export LLM_BACKEND=ollama
-export LLM_MODEL='$MODEL'
+export LLM_MODEL='$NAME'
+export LLM_BASE_URL=http://localhost:11434
 export LLM_NUM_CTX=$OLLAMA_CONTEXT_LENGTH
+export LLM_PYTHON=$PWD/venv/bin/python
+export OLLAMA_NUM_PARALLEL=$OLLAMA_NUM_PARALLEL
 ENV
 
+# Fail fast (DESIGN.md Q12): no automatic fallback to another engine or model.
 echo "== Smoke test"
-LLM_MODEL="$MODEL" ./venv/bin/python -c '
-import os, sys; sys.path.insert(0, "scripts")
+if ! LLM_MODEL="$NAME" ./venv/bin/python - <<'PY'
+import os, sys
+sys.path.insert(0, "scripts")
 from llm_common import LLMClient
-r = LLMClient("ollama", os.environ["LLM_MODEL"]).generate("Say hello in Polish.", max_tokens=32)
-print("ok:", r.ok, repr(r.text), r.error)'
+r = LLMClient("ollama", os.environ["LLM_MODEL"], timeout=600).generate("Say hello in Polish.", max_tokens=32)
+print("ok:", r.ok, repr(r.text), r.error)
+sys.exit(0 if r.ok and r.text.strip() else 1)
+PY
+then
+  echo "Smoke test failed. Last Ollama log lines:"; tail -n 40 "$W/ollama.log"
+  echo "Retry manually with another tag, e.g.  LLM_MODEL=huihui_ai/Qwen3.8-abliterated ./vast/bench.sh ollama"
+  exit 1
+fi
+ollama ps || true
+mark ready
+touch "$W/READY"
 echo "READY"

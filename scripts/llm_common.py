@@ -27,7 +27,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 DATA_FILE = os.path.join(ROOT, "data", "samples.json")
 OUTPUT_DIR = os.path.join(ROOT, "output")
 
-DEFAULT_OLLAMA_MODEL = "hf.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:Q4_K"
+DEFAULT_OLLAMA_MODEL = "hf.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf"
 DEFAULT_OPENAI_MODEL = "huihui-ai/Huihui-Qwen3.8-27B-abliterated"
 DEFAULT_URLS = {"ollama": "http://localhost:11434", "openai": "http://localhost:8000"}
 

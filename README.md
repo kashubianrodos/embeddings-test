@@ -1,9 +1,23 @@
 # embeddings-test
 
-Benchmark and semantic-accuracy tests for local Ollama embedding models, based on
-[Decoding AI's Inner Language: How to Test Your Embedding Models](https://dev.to/aairom/decoding-ais-inner-language-how-to-test-your-embedding-models-126).
+Two benchmark suites in one repo:
 
-## Models tested
+1. **Embedding models (local Ollama)**: speed and EN↔PL semantic accuracy of small embedding models.
+2. **Generative LLM on rented vast.ai GPUs**: speed, load and EN↔PL translation quality of
+   `huihui-ai/Huihui-Qwen3.8-27B-abliterated`. It runs as a single command that rents the cheapest
+   suitable machine and always destroys it at the end.
+
+Both use the same dataset: `data/samples.json` holds 500 parallel English/Polish sentence pairs.
+The embedding tests use the pairs for cross-lingual retrieval. The LLM tests use them as prompts and as the
+translation reference.
+
+`DESIGN.md` explains why the vast.ai part is built the way it is. This README covers how to run it.
+
+---
+
+## Part 1: embedding models (local)
+
+Based on [Decoding AI's Inner Language: How to Test Your Embedding Models](https://dev.to/aairom/decoding-ais-inner-language-how-to-test-your-embedding-models-126).
 
 | Model | Approx. size |
 | :--- | :--- |
@@ -11,28 +25,15 @@ Benchmark and semantic-accuracy tests for local Ollama embedding models, based o
 | `granite-embedding:278m` | ~278 MB |
 | `paraphrase-multilingual` | ~563 MB |
 
-## Dataset
+1. **`scripts/benchmark.py`** runs the three pillars from the article: latency (per language and total),
+   model size, and vector dimension. It writes a Markdown report and the raw JSON vectors to `output/`.
+2. **`scripts/semantic_test.py`** tests cross-lingual retrieval. For each EN sentence, it checks whether the PL
+   translation is the nearest PL vector (top-1 accuracy, both directions). It also reports the mean cosine similarity of
+   true pairs vs. non-pairs, and the separation margin.
+3. **`scripts/speed_test.py`** times each embedding call individually (after warmup). It reports mean, median, p95,
+   min and max latency, plus throughput in texts/s.
 
-`data/samples.json` — 50 parallel English/Polish sentence pairs (100 texts total).
-Because the Polish sentences are translations of the English ones, the same data
-supports both a speed benchmark and a cross-lingual semantic accuracy test.
-
-## Tests
-
-1. **`scripts/benchmark.py`** — the three pillars from the article: latency
-   (per language and total), model size, and vector dimension. Writes a Markdown
-   report and raw JSON vectors to `output/`.
-2. **`scripts/semantic_test.py`** — semantic accuracy via cross-lingual retrieval:
-   for each EN sentence, is its PL translation the nearest PL vector (top-1
-   accuracy, both directions)? Also reports mean cosine similarity of true pairs
-   vs. non-pairs and the separation margin.
-3. **`scripts/speed_test.py`** — detailed per-model speed test: times each
-   embedding call individually (after warmup) and reports mean / median /
-   p95 / min / max latency and throughput (texts/s).
-
-## Usage
-
-Requires [Ollama](https://ollama.com) running locally (`http://localhost:11434`).
+This part requires [Ollama](https://ollama.com) running locally at `http://localhost:11434`.
 
 ```bash
 ./run_all.sh
@@ -55,16 +56,184 @@ python scripts/speed_test.py
 
 Reports land in `output/` as timestamped Markdown files.
 
-## Generative LLM tests (vast.ai)
+How to read the results:
 
-See [LLM_BENCHMARK.md](LLM_BENCHMARK.md) for speed, load and EN↔PL translation-quality
-tests of `huihui-ai/Huihui-Qwen3.8-27B-abliterated` on rented vast.ai GPUs.
+- **Speed**: a lower total duration is better for real-time or high-throughput use.
+- **Dimension**: a higher dimension usually captures more semantic nuance, at a cost.
+- **Top-1 accuracy**: how well the model aligns Polish and English meaning. This is the key metric for
+  multilingual RAG over Polish content.
+- **Separation margin**: a larger margin means a clearer distinction between related and unrelated texts, which makes
+  retrieval thresholds easier to set.
 
-## Interpreting results
+---
 
-- **Speed**: lower total duration = better for real-time / high-throughput use.
-- **Dimension**: higher usually means more semantic nuance, at a cost.
-- **Top-1 accuracy**: how well the model aligns Polish and English meaning —
-  the key metric for multilingual RAG over Polish content.
-- **Separation margin**: larger margin = clearer distinction between related
-  and unrelated texts, which improves retrieval thresholding.
+## Part 2: generative LLM on vast.ai
+
+### What it measures
+
+| Script | Measures |
+| :--- | :--- |
+| `scripts/llm_speed_test.py` | Single stream: TTFT, latency, decode tok/s, prefill sweep |
+| `scripts/llm_load_test.py` | Concurrency sweep: aggregate tok/s, req/s, TTFT and latency p50/p95 |
+| `scripts/llm_quality_test.py` | EN↔PL translation chrF (matches sacreBLEU), exact match, `<think>` leaks |
+
+There are two modes. Run them as two separate, cheap runs:
+
+| Mode | Answers | Weights | Machine the ranker picks from | Default billing | Rough cost / run* |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `ollama` | "How does it feel for one user?" and "Did quantization or abliteration hurt quality?" | GGUF Q4_K, 16.8 GB | 1× RTX 3090 or RTX 4090 (24 GB) | interruptible | ~$0.2–0.5 |
+| `vllm` | "How many users can one GPU serve?" | FP8, 28 GB (`VLLM_PRESET=fp8`) | 1× 48 GB Ada or Hopper (L40S, L40, RTX 6000 Ada, H100) | on-demand | ~$1–1.5 |
+| `vllm` + `VLLM_PRESET=bf16` | Full-precision reference only | BF16, 56 GB | 1× 80 GB (A100, H100) | on-demand | ~$2–4 |
+
+\*These are estimates from September 2026 market prices. Every run prints its real estimate before renting and its
+actual cost afterwards (`run_summary.md`).
+
+### One-time setup (on your machine)
+
+1. Create a vast.ai account, add credit, and add your **SSH public key** under Account → SSH Keys.
+2. Install the CLI and store your API key:
+   ```bash
+   pip install -r requirements-vast.txt
+   vastai set api-key <YOUR_KEY>          # or put VAST_AI_API_KEY=... in vast/.env
+   ```
+3. Create your config. The defaults are sensible, so the file can stay empty:
+   ```bash
+   cp vast/.env.example vast/.env         # vast/.env is git-ignored. Secrets go here only.
+   ```
+   Optionally set `HF_KEY` (a Hugging Face token) in it for faster, unthrottled downloads.
+4. **Push your commits.** The instance runs `git clone` on `REPO_URL` and checks out your local `HEAD`.
+   `bench.sh` refuses to start if you're ahead of the upstream branch. The repo must be public, or `REPO_URL` must
+   contain a token.
+
+### Run
+
+```bash
+./vast/bench.sh ollama                  # cheapest interruptible 3090/4090, full benchmark
+./vast/bench.sh ollama --quick          # ~2-minute smoke run: check the pipeline first
+./vast/bench.sh vllm                    # FP8 on a 48 GB Ada/Hopper card, on-demand
+VLLM_PRESET=bf16 ./vast/bench.sh vllm   # BF16 reference on 80 GB
+```
+
+Flags: `--interruptible` or `--on-demand` override the per-mode default. `--quick` runs the smoke-size
+benchmark. `--yes` skips the "Rent offer …?" prompt.
+
+What happens:
+
+1. **Rank.** The script searches offers that pass the filters (GPU, CUDA, reliability, download speed, disk,
+   bandwidth price). It prints the top 10 **by estimated total cost of the whole run**, not by hourly price
+   (formula below), and picks the cheapest.
+2. **Guard.** If that estimate exceeds `MAX_RUN_USD_OLLAMA` ($3) or `MAX_RUN_USD_VLLM` ($6), it refuses to rent.
+3. **Rent.** It creates the instance with a pinned image. All settings travel in a single env var, and the
+   instance bootstraps itself with `vast/onstart.sh` and then `vast/setup_<mode>.sh`.
+4. **Wait for READY.** It polls every 30 s. If the setup script fails (for example, the model doesn't load), the run
+   stops immediately. There is no automatic fallback.
+5. **Benchmark.** `vast/run_llm_bench.sh` runs on the instance under `nohup`, so a dropped SSH connection doesn't
+   kill it. If an interruptible instance is preempted mid-run, the script waits up to `OUTBID_WAIT_MIN` (15 min) for
+   it to resume, then reruns the benchmark once.
+6. **Always:** it fetches logs and reports into `output_vast/<instance-id>/`, writes `run_summary.md`, and **destroys
+   the instance**. It then verifies the instance is gone and prints a loud warning if it can't confirm that. This
+   happens on success, on failure, on Ctrl-C, when `MAX_HOURS` (3 h) is reached, and after a preemption that doesn't
+   resume.
+
+### Results
+
+`output_vast/<instance-id>/` contains:
+
+| File | Content |
+| :--- | :--- |
+| `llm_speed_*.md/json`, `llm_load_*.md/json`, `llm_quality_*.md/json` | Benchmark reports. File names carry the GPU and mode, e.g. `RTX-4090-ollama-q4k` |
+| `gpu_log_*.csv` | Per-second GPU utilization, VRAM, power and temperature |
+| `run_summary.md/json` | Estimated vs. actual cost, phase durations, measured download speed |
+| `setup.log`, `onstart.log`, `bench.log`, `ollama.log`/`vllm.log`, `timings.log`, `local_events.log` | Everything needed to debug a failed run |
+
+Use `run_summary.md` to tune the cost model: it reports the measured `NET_EFFICIENCY` and phase durations. Put
+better values for `NET_EFFICIENCY`, `SETUP_HOURS` and `BENCH_HOURS_*` into `vast/.env`.
+
+### How "cheapest" is computed
+
+```
+estimated run cost = $/h × (download_GB × 8000 / (inet_down_Mbps × NET_EFFICIENCY) / 3600 + SETUP_HOURS + BENCH_HOURS)
+                   + download_GB × inet_down_cost ($/GB)
+```
+
+The `$/h` figure depends on the billing type:
+
+- **On-demand:** `dph_total`, searched with your real disk size (`--storage`), so storage is included.
+- **Interruptible:** `min_bid × BID_MULTIPLIER` (1.25), plus storage.
+
+A cheap host with a slow or expensive link can lose to a slightly pricier one that downloads 20–44 GB much faster.
+
+### Configuration
+
+Every setting lives in `vast/.env.example`, with its default and a comment. The most useful ones:
+
+| Setting | Default | Effect |
+| :--- | :--- | :--- |
+| `GPU_NAME` | – | Pin one card (e.g. `RTX_4090`) so speed numbers are comparable across runs |
+| `INTERRUPTIBLE` | ollama `1`, vllm `0` | Bid vs. on-demand |
+| `MAX_HOURS` / `MAX_RUN_USD_*` | `3` / `$3`, `$6` | Hard limits |
+| `VLLM_PRESET` | `fp8` | `bf16` = 80 GB reference run |
+| `OLLAMA_NUM_PARALLEL` / `OLLAMA_CONTEXT_LENGTH` | `4` / `8192` | Ollama concurrency slots and context |
+| `VLLM_MAX_MODEL_LEN` / `VLLM_EXTRA_ARGS` | `16384` / `--language-model-only --kv-cache-dtype fp8 --reasoning-parser qwen3` | vLLM server |
+| `EXTRA_QUERY` | – | Extra vast filters, e.g. `geolocation in [DE,NL,PL]` |
+| `OFFER_ID` | – | Force a specific offer (it must still pass the filters) |
+
+A value exported in your shell overrides `vast/.env`, e.g. `MAX_HOURS=1 GPU_NAME=RTX_4090 ./vast/bench.sh ollama`.
+
+### Step by step (debugging)
+
+`bench.sh` is the supported path. The individual steps still work on their own:
+
+```bash
+./vast/launch.sh ollama --interruptible     # rank + rent only
+./vast/ssh.sh 'tail -f /workspace/setup.log'
+./vast/ssh.sh 'bash /workspace/embeddings-test/vast/run_llm_bench.sh'
+./vast/fetch_results.sh                     # -> output_vast/<id>/
+./vast/destroy.sh                           # STOP BILLING (asks; -y to skip)
+```
+
+If you rent this way, **nothing destroys the instance for you**.
+
+### Manual runs against any server
+
+The test scripts work against any Ollama server or OpenAI-compatible server (vLLM, llama.cpp `llama-server`,
+SGLang):
+
+```bash
+pip install -r requirements-llm.txt
+python scripts/llm_speed_test.py   --backend ollama --model <name> --n 30 --prefill-sizes 1024,4096,8192
+python scripts/llm_load_test.py    --backend openai --base-url http://host:8000 --model <served-name> --concurrency 1,8,32
+python scripts/llm_quality_test.py --n 200          # the dataset has 500 pairs
+```
+
+Shared flags: `--backend ollama|openai --model … --base-url … --think --num-ctx … --tag …`.
+
+### Reading the numbers
+
+- **TTFT** is prefill plus queueing. If TTFT rises at higher concurrency, the server is saturated.
+- **Decode tok/s (single stream)** is what one user feels. The client-side value includes network jitter; Ollama also
+  reports the exact server-side value.
+- **Output tok/s at concurrency N** is serving capacity.
+  - On Ollama it plateaus at `OLLAMA_NUM_PARALLEL`. The sweep deliberately goes to 2× that value to show queueing.
+  - vLLM keeps scaling until the KV cache runs out.
+- **chrF** is for comparing runs (quantization vs. BF16, backend vs. backend). It is not an absolute grade.
+- Thinking mode is **off** by default, so token counts measure the answer rather than hidden reasoning. Add `--think`
+  to benchmark reasoning mode.
+
+### Troubleshooting
+
+- **"ahead of its upstream"**: run `git push`. The instance can only run pushed code.
+- **"No usable offer"**: loosen the filters. Try `MAX_INET_DOWN_COST`, `MIN_INET_DOWN_*`, `EXTRA_QUERY`, a different
+  `GPU_NAME`, or `--on-demand`.
+- **"Cheapest run is estimated at … > MAX_RUN_USD"**: raise the cap in `vast/.env` or relax the filters.
+- **Ollama setup failed on the smoke test** (for example `unknown model architecture`, or a problem with the vision
+  file `mmproj`): the pinned Ollama version couldn't load this GGUF. Retry with the Ollama-library build, or pin a
+  newer image:
+  `LLM_MODEL=huihui_ai/Qwen3.8-abliterated ./vast/bench.sh ollama` or `OLLAMA_IMAGE=ollama/ollama:<newer> …`.
+- **vLLM fails to load the FP8 checkpoint**: the third-party checkpoint has only been validated on another vLLM fork.
+  Check `vllm.log`, try a newer `VLLM_IMAGE`, or use `VLLM_PRESET=bf16`.
+- **vLLM out of memory**: lower `VLLM_MAX_MODEL_LEN` or `VLLM_GPU_MEM_UTIL`.
+- **Ollama slow or partly offloaded to CPU**: `ollama.log` shows the layer split. Lower `OLLAMA_NUM_PARALLEL` or
+  `OLLAMA_CONTEXT_LENGTH`, or set `OLLAMA_KV_CACHE_TYPE=q8_0`.
+- **"COULD NOT CONFIRM DESTROY"**: check `vastai show instances` or the web console right away. Storage bills even
+  while an instance is stopped.
