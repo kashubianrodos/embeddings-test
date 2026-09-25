@@ -177,6 +177,7 @@ Every setting lives in `vast/.env.example`, with its default and a comment. The 
 
 | Setting | Default | Effect |
 | :--- | :--- | :--- |
+| `REGION` | `europe` | Where the machine may be: `europe` (EU + UK, NO, CH, IS, LI, Western Balkans, MD, UA), `eu` (EU-27), `any`, or a list like `DE,PL,NL` |
 | `GPU_NAME` / `VLLM_GPU_NAME` | – | Pin one card (e.g. `RTX_4090` / `L40S`) so speed numbers are comparable across runs |
 | `INTERRUPTIBLE` | `0` | `1` = interruptible bid instead of on-demand |
 | `MAX_HOURS` / `MAX_RUN_USD_*` | `3` / `$3`, `$6` | Hard limits |
@@ -244,7 +245,7 @@ Shared flags: `--backend ollama|openai --model … --base-url … --think --num-
   or exclude the host with `EXTRA_QUERY='machine_id!=<id>'`.
 - **"no SSH for 10 min"**: check that your key is registered with `vastai show ssh-keys`.
 - **"ahead of its upstream"**: run `git push`. The instance can only run pushed code.
-- **"No usable offer"**: loosen the filters. Try `MAX_INET_DOWN_COST`, `MIN_INET_DOWN_*`, `EXTRA_QUERY`, a different
+- **"No usable offer"**: loosen the filters. Try `REGION=any` (or a wider list),  `MAX_INET_DOWN_COST`, `MIN_INET_DOWN_*`, `EXTRA_QUERY`, a different
   `GPU_NAME`, or `--on-demand`.
 - **"Cheapest run is estimated at … > MAX_RUN_USD"**: raise the cap in `vast/.env` or relax the filters.
 - **Ollama setup failed on the smoke test** (for example `unknown model architecture`, or a problem with the vision

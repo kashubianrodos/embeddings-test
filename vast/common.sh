@@ -71,6 +71,20 @@ api_key_source() {
   else echo "NONE — set VAST_AI_API_KEY in vast/.env or run: vastai set api-key <KEY>"; fi
 }
 
+# Two-letter country codes as vast reports them in `geolocation`.
+EU_CODES="AT,BE,BG,HR,CY,CZ,DK,EE,FI,FR,DE,GR,HU,IE,IT,LV,LT,LU,MT,NL,PL,PT,RO,SK,SI,ES,SE"
+EUROPE_CODES="$EU_CODES,GB,NO,CH,IS,LI,RS,BA,ME,MK,AL,MD,UA"
+
+# REGION → country list for the offer search: europe | eu | any | explicit list "DE,PL,NL"
+region_codes() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    europe) echo "$EUROPE_CODES" ;;
+    eu)     echo "$EU_CODES" ;;
+    any|all|'') echo "" ;;
+    *)      printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d ' ' ;;
+  esac
+}
+
 # resolve_config <ollama|vllm>: every knob gets a value; nothing is hidden in other scripts.
 resolve_config() {
   MODE="$1"
@@ -148,7 +162,10 @@ resolve_config() {
   BENCH_MODE="$MODE"
   BENCH_LABEL="$MODE-$PRESET"
 
+  REGION="${REGION:-europe}"
+  REGION_CODES=$(region_codes "$REGION")
   QUERY="num_gpus=1 $GPU_FILTER reliability>$MIN_RELIABILITY inet_down>=$MIN_INET_DOWN disk_space>=$DISK_GB cuda_vers>=$CUDA_MIN rentable=true"
+  [ -n "$REGION_CODES" ] && QUERY="$QUERY geolocation in [$REGION_CODES]"
   [ -n "$EXTRA_QUERY" ] && QUERY="$QUERY $EXTRA_QUERY"
   return 0
 }

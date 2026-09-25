@@ -31,6 +31,7 @@ REPO_COMMIT=$(git -C "$ROOT_DIR" rev-parse HEAD)
 
 KIND="on-demand"; [ "$INTERRUPTIBLE" = 1 ] && KIND="interruptible"
 log "Mode $MODE/$PRESET, $KIND, image $IMAGE, disk ${DISK_GB} GB, model $LLM_MODEL"
+log "Region: $REGION${REGION_CODES:+ ($REGION_CODES)}"
 log "Query: $QUERY"
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
@@ -43,7 +44,7 @@ python3 "$TOOL" rank --offers "$TMP/offers.json" --out "$TMP/chosen.json" \
   --disk "$DISK_GB" --download-gb "$DOWNLOAD_GB" --setup-hours "$SETUP_HOURS" --bench-hours "$BENCH_HOURS" \
   --net-eff "$NET_EFFICIENCY" --max-inet-cost "$MAX_INET_DOWN_COST" \
   --interruptible "$INTERRUPTIBLE" --bid-mult "$BID_MULTIPLIER" --offer-id "$OFFER_ID" \
-  || die "No usable offer. Relax the filters in vast/.env (EXTRA_QUERY, MIN_INET_DOWN_*, MAX_INET_DOWN_COST, GPU_NAME)."
+  || die "No usable offer. Relax the filters in vast/.env (REGION=any, EXTRA_QUERY, MIN_INET_DOWN_*, MAX_INET_DOWN_COST, GPU_NAME)."
 
 get() { python3 "$TOOL" get "$TMP/chosen.json" "$1"; }
 OFFER=$(get offer_id); EST=$(get est_total_usd); PRICE=$(get price_h); BID=$(get bid_price)
