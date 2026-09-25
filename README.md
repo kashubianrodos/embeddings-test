@@ -81,7 +81,7 @@ There are two modes. Run them as two separate, cheap runs:
 
 | Mode | Answers | Weights | Machine the ranker picks from | Default billing | Rough cost / run* |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `ollama` | "How does it feel for one user?" and "Did quantization or abliteration hurt quality?" | GGUF Q4_K, 16.8 GB | 1× RTX 3090 or RTX 4090 (24 GB) | interruptible | ~$0.2–0.5 |
+| `ollama` | "How does it feel for one user?" and "Did quantization or abliteration hurt quality?" | GGUF Q4_K, 16.8 GB | 1× RTX 3090 or RTX 4090 (24 GB) | on-demand | ~$0.2–0.5 |
 | `vllm` | "How many users can one GPU serve?" | FP8, 28 GB (`VLLM_PRESET=fp8`) | 1× 48 GB Ada or Hopper (L40S, L40, RTX 6000 Ada, H100) | on-demand | ~$1–1.5 |
 | `vllm` + `VLLM_PRESET=bf16` | Full-precision reference only | BF16, 56 GB | 1× 80 GB (A100, H100) | on-demand | ~$2–4 |
 
@@ -90,9 +90,9 @@ actual cost afterwards (`run_summary.md`).
 
 ### One-time setup (on your machine)
 
-1. Create a vast.ai account, add credit, and add your **SSH public key** under Account → SSH Keys
-   (or `vastai create ssh-key "$(cat ~/.ssh/id_ed25519.pub)"`). Without it the run fails after
-   `SSH_WAIT_MIN` with "no SSH".
+1. Create a vast.ai account, add credit, and add **the SSH public key of this machine**:
+   `vastai create ssh-key "$(cat ~/.ssh/id_ed25519.pub)"` (or Account → SSH Keys).
+   `bench.sh` compares your local keys with the account's keys and refuses to rent if none match.
 2. Install the CLI and store your API key:
    ```bash
    pip install -r requirements-vast.txt
@@ -110,13 +110,13 @@ actual cost afterwards (`run_summary.md`).
 ### Run
 
 ```bash
-./vast/bench.sh ollama                  # cheapest interruptible 3090/4090, full benchmark
+./vast/bench.sh ollama                  # cheapest 3090/4090 (on-demand), full benchmark
 ./vast/bench.sh ollama --quick          # ~2-minute smoke run: check the pipeline first
 ./vast/bench.sh vllm                    # FP8 on a 48 GB Ada/Hopper card, on-demand
 VLLM_PRESET=bf16 ./vast/bench.sh vllm   # BF16 reference on 80 GB
 ```
 
-Flags: `--interruptible` or `--on-demand` override the per-mode default. `--quick` runs the smoke-size
+Flags: `--interruptible` bids for a cheaper machine that vast may stop at any time (see Troubleshooting); `--on-demand` is the default. `--quick` runs the smoke-size
 benchmark. `--yes` skips the "Rent offer …?" prompt.
 
 What happens:
@@ -134,7 +134,7 @@ What happens:
    - the machine is running but has no SSH for `SSH_WAIT_MIN` (10 min).
    - it is still loading after `LOAD_WAIT_MIN` (20 min).
 5. **Benchmark.** `vast/run_llm_bench.sh` runs on the instance under `nohup`, so a dropped SSH connection doesn't
-   kill it. If an interruptible instance is preempted mid-run, the script waits up to `OUTBID_WAIT_MIN` (15 min) for
+   kill it. If an interruptible instance is preempted mid-run, the script waits up to `OUTBID_WAIT_MIN` (5 min) for
    it to resume, then reruns the benchmark once.
 6. **Always:** it fetches logs and reports into `output_vast/<instance-id>/`, writes `run_summary.md`, and **destroys
    the instance**. Fetching is capped at `FETCH_TIMEOUT` (180 s) and never prompts, so it can't block the destroy.
@@ -178,7 +178,7 @@ Every setting lives in `vast/.env.example`, with its default and a comment. The 
 | Setting | Default | Effect |
 | :--- | :--- | :--- |
 | `GPU_NAME` | – | Pin one card (e.g. `RTX_4090`) so speed numbers are comparable across runs |
-| `INTERRUPTIBLE` | ollama `1`, vllm `0` | Bid vs. on-demand |
+| `INTERRUPTIBLE` | `0` | `1` = interruptible bid instead of on-demand |
 | `MAX_HOURS` / `MAX_RUN_USD_*` | `3` / `$3`, `$6` | Hard limits |
 | `VLLM_PRESET` | `fp8` | `bf16` = 80 GB reference run |
 | `OLLAMA_NUM_PARALLEL` / `OLLAMA_CONTEXT_LENGTH` | `4` / `8192` | Ollama concurrency slots and context |
@@ -230,9 +230,16 @@ Shared flags: `--backend ollama|openai --model … --base-url … --think --num-
 
 ### Troubleshooting
 
+- **"none of your local SSH keys is in your vast account"** / **"has NO SSH keys"**: add the key it
+  lists as local: `vastai create ssh-key "$(cat ~/.ssh/id_ed25519.pub)"`. The fingerprints printed match
+  `ssh-keygen -lf ~/.ssh/id_ed25519.pub` and the `Failed publickey … SHA256:…` lines in `container.log`.
+- **"Preempted: vast stopped the instance"**: only with `--interruptible`. Someone outbid you or rented
+  the GPU on-demand. The run waits `OUTBID_WAIT_MIN`, then destroys. Rerun, or use the on-demand default.
+- **`⚠️ vast/.env:N: …` warnings**: that line isn't a single `KEY=value` (explanatory text, or two values).
+  Put `#` in front of it. Quote values that contain spaces.
 - **"An instance is already tracked"**: a previous run didn't finish cleanup. `./vast/destroy.sh -y <id>` destroys
   it (if it still exists), verifies it's gone, and clears the local state.
-- **"The container exited on its own"**: read `output_vast/<id>/container.log` and `daemon.log`. Common causes are an
+- **"The container exited on its own"** (vast still intended it to run): read `output_vast/<id>/container.log` and `daemon.log`. Common causes are an
   image that isn't compatible with vast's SSH launch mode, or a host problem. Retry and the ranker picks the next host,
   or exclude the host with `EXTRA_QUERY='machine_id!=<id>'`.
 - **"no SSH for 10 min"**: check that your key is registered with `vastai show ssh-keys`.

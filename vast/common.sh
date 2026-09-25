@@ -19,18 +19,39 @@ event() { printf '%s %s\n' "$(date +%s)" "$*" >> "$STATE_EVENTS"; }
 secs_from_hours() { awk -v h="$1" 'BEGIN{printf "%d", h*3600}'; }
 
 # Load KEY=VALUE lines from a file without overriding variables already set in the
-# environment (so `MAX_HOURS=1 ./vast/bench.sh` beats vast/.env).
+# environment (so `MAX_HOURS=1 ./vast/bench.sh` beats vast/.env). Parsed, never eval'd:
+#   KEY=value   KEY='value with spaces'   KEY="value"   KEY=   # trailing comments are fine
+# No $expansion. Anything else on a line is reported (once per run) and ignored.
+env_warn() { [ -n "${ENV_WARNED:-}" ] || printf '⚠️  %s\n' "$*" >&2; }
 load_env_file() {
-  local f="$1" line key
+  local f="$1" line key val rest n=0
   [ -f "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
     line="${line#"${line%%[![:space:]]*}"}"
     case "$line" in ''|'#'*) continue ;; esac
     line="${line#export }"
-    key="${line%%=*}"
-    case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
-    if [ -z "${!key+x}" ]; then eval "export $line"; fi
+    case "$line" in
+      *=*) ;;
+      *) env_warn "${f##*/}:$n: not KEY=VALUE (comment it out with #): ${line:0:60}"; continue ;;
+    esac
+    key="${line%%=*}"; rest="${line#*=}"
+    case "$key" in
+      ''|*[!A-Za-z0-9_]*) env_warn "${f##*/}:$n: not KEY=VALUE (comment it out with #): ${line:0:60}"; continue ;;
+    esac
+    case "$rest" in
+      \'*) val="${rest#\'}"; val="${val%%\'*}"; rest="${rest#\'"$val"\'}" ;;
+      \"*) val="${rest#\"}"; val="${val%%\"*}"; rest="${rest#\""$val"\"}" ;;
+      *)   val="${rest%%[[:space:]]*}"; rest="${rest#"$val"}" ;;
+    esac
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    case "$rest" in
+      ''|'#'*) ;;
+      *) env_warn "${f##*/}:$n: $key='$val' — ignored trailing text '${rest:0:40}' (quote values that contain spaces)" ;;
+    esac
+    if [ -z "${!key+x}" ]; then export "$key=$val"; fi
   done < "$f"
+  export ENV_WARNED=1
 }
 
 # vast/.env + secret aliases. Runs whenever common.sh is sourced, so standalone scripts
@@ -60,7 +81,7 @@ resolve_config() {
   REPO_BRANCH="${REPO_BRANCH:-$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}"
 
   BID_MULTIPLIER="${BID_MULTIPLIER:-1.25}"
-  OUTBID_WAIT_MIN="${OUTBID_WAIT_MIN:-15}"
+  OUTBID_WAIT_MIN="${OUTBID_WAIT_MIN:-5}"
   MAX_HOURS="${MAX_HOURS:-3}"
   QUICK="${QUICK:-0}"
   ASSUME_YES="${ASSUME_YES:-0}"
@@ -75,7 +96,7 @@ resolve_config() {
   FETCH_TIMEOUT="${FETCH_TIMEOUT:-180}"
 
   if [ "$MODE" = ollama ]; then
-    INTERRUPTIBLE="${INTERRUPTIBLE:-1}"
+    INTERRUPTIBLE="${INTERRUPTIBLE:-0}"   # 2/2 interruptible runs were stopped within 5 min (DESIGN Q3)
     MAX_RUN_USD="${MAX_RUN_USD_OLLAMA:-3}"
     BENCH_HOURS="${BENCH_HOURS_OLLAMA:-0.75}"
     MIN_INET_DOWN="${MIN_INET_DOWN_OLLAMA:-500}"
@@ -190,8 +211,11 @@ run_limited() {
   local pid=$!
   ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null; sleep 5; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
   local watchdog=$!
-  wait "$pid"; local rc=$?
-  kill "$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null
+  # `|| ...` everywhere: callers run under `set -e`, where a bare failing `wait` would exit them
+  local rc=0
+  wait "$pid" || rc=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
   return $rc
 }
 

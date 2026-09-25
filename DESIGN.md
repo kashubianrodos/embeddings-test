@@ -78,7 +78,7 @@ There is no daemon and no open port apart from SSH. Each poll is one SSH call th
 | # | Decision | Why | Rejected |
 | :- | :--- | :--- | :--- |
 | Q8 | Offers are ranked by **estimated total run cost** (section 4) by `vast/vast_tool.py rank`, called from `launch.sh`. | `-o dph` alone ranks by a price that counts only 5 GB of storage and ignores download time and bandwidth price. | Sorting by `dph`, which was the previous behaviour. |
-| Q3 | `--interruptible` / `--on-demand` flags. The default is interruptible for Ollama and on-demand for vLLM. | Interruptible is about 60% cheaper. Preemption costs a re-download: minutes for Ollama's 17 GB, more for vLLM's 28–56 GB, where on-demand is safer. | Always on-demand, as before. |
+| Q3 (revised after two real runs) | `--interruptible` / `--on-demand` flags, **on-demand by default for both modes**. Originally Ollama defaulted to interruptible. Both real runs were then stopped by vast within 2.5–4.5 min. The second time, the bid ($0.129) was still above the current `min_bid` ($0.093), so an on-demand renter probably took the GPU. For a job of about 1 h, on-demand costs about $0.05 more and isn't lost halfway. | Interruptible is about 60% cheaper. Preemption costs a re-download: minutes for Ollama's 17 GB, more for vLLM's 28–56 GB, where on-demand is safer. | Always on-demand, as before. |
 | Q9 | The bid is `min_bid × 1.25` (`BID_MULTIPLIER`). | A bid just above the floor gets outbid within minutes; 1.25× buys some stability for little money. | A fixed dollar bid. |
 | Q16 | Budget guards: `MAX_RUN_USD` (ollama $3, vllm $6) is checked **before** renting. `MAX_HOURS=3` is a hard wall-clock stop. | This caps the damage from a bad estimate or a hung setup. | No caps. |
 
@@ -87,7 +87,7 @@ There is no daemon and no open port apart from SSH. Each poll is one SSH call th
 | # | Decision | Why | Rejected |
 | :- | :--- | :--- | :--- |
 | Q10 | `vast/bench.sh` is the documented entry point and **always** fetches logs, then destroys the instance. | Forgetting `destroy.sh` is the most expensive failure. The trap is armed *before* renting, so even a failure inside `launch.sh` after the instance exists is cleaned up. | Manual steps as the default. They remain available for debugging. |
-| – | If a preempted instance doesn't resume within `OUTBID_WAIT_MIN` (15 min), fetch and destroy. After a resume, rerun the benchmark at most once. | Storage bills while an instance is stopped. Setup is idempotent: the model is already on disk, so a resume costs minutes. | Waiting forever, or never retrying. |
+| – | If a preempted instance doesn't resume within `OUTBID_WAIT_MIN` (5 min; a GPU taken by an on-demand renter rarely comes back soon), fetch and destroy. After a resume, rerun the benchmark at most once. | Storage bills while an instance is stopped. Setup is idempotent: the model is already on disk, so a resume costs minutes. | Waiting forever, or never retrying. |
 | Q4 | `vast/.env.example` is committed and `vast/.env` is git-ignored. **Every** setting is resolved in one place (`common.sh`) and forwarded to the instance. | Previously `OLLAMA_NUM_PARALLEL`, `VLLM_MAX_MODEL_LEN` and similar were documented as settings but never reached the instance. `launch.sh` only forwarded 3 variables. | Env vars spread across three scripts. |
 | – | Settings are forwarded as **one** base64url blob, `-e BENCH_ENV_B64=…`, which onstart decodes to `/workspace/remote.env` (mode 600). | vast's `-e` parser has its own quoting rules. Values like `--language-model-only --kv-cache-dtype fp8` would need escaping. One opaque token can't be mangled. | Many `-e K=V` pairs. |
 | – | The instance checks out your exact local `HEAD` (`REPO_COMMIT`). `bench.sh` refuses to start if the branch is ahead of its upstream. | Results must correspond to known code. Without the check, an unpushed change silently doesn't run. | Cloning `main`. |
@@ -120,7 +120,7 @@ speed (and hence NET_EFFICIENCY), phase durations and actual cost to `run_summar
 
 | Situation | Detected by | Result |
 | :--- | :--- | :--- |
-| Container exits on its own (`exited`) | `show instance` | Show `status_msg` + `vastai logs`, fetch, destroy. **Not** treated as a preemption (the first real run lost 15 min waiting on this) |
+| Container exits while vast still intends it to run (`exited` + `intended_status=running`) | `show instance` | Show `status_msg` + `vastai logs`, fetch, destroy. **Not** treated as a preemption (the first real run lost 15 min waiting on this) |
 | Running, but no SSH for `SSH_WAIT_MIN` | poll | Show vast logs, fetch, destroy (usually a missing SSH key) |
 | Stuck `loading` for `LOAD_WAIT_MIN` | `show instance` | Show vast logs, fetch, destroy |
 | No offer passes the filters | the ranker returns nothing | Refuse to rent; suggest which filters to relax |
@@ -128,7 +128,7 @@ speed (and hence NET_EFFICIENCY), phase durations and actual cost to `run_summar
 | Clone or checkout fails (unpushed commit, private repo) | `onstart.sh` → `SETUP_FAILED` | Fetch logs, destroy |
 | Model won't load (e.g. Ollama `qwen35` or mmproj issue, FP8 kernel) | smoke test → `SETUP_FAILED` | Fetch logs, destroy, print the retry hint |
 | SSH connection drops | the benchmark runs under `nohup` | Polling continues |
-| Outbid or preempted (`stopped`/`offline`) | `show instance` | Wait `OUTBID_WAIT_MIN`, then resume (rerun the benchmark once) or fetch and destroy |
+| Outbid or preempted (`stopped`/`offline`, or `exited` with `intended_status=stopped`) | `show instance` | Wait `OUTBID_WAIT_MIN`, then resume (rerun the benchmark once) or fetch and destroy |
 | Hang anywhere | `MAX_HOURS` | Fetch whatever exists, destroy |
 | Ctrl-C | INT trap | Fetch, destroy |
 | Destroy not confirmed | `show instance` still lists the instance after 3 attempts | Loud warning with the instance id |
@@ -145,6 +145,18 @@ host) prompted for a password and hung before the destroy, so the instance had t
 `onstart.sh` runs as part of vast's SSH-mode entrypoint, so its top level no longer does anything that could exit,
 exec or block. It writes `bootstrap.sh` and starts it detached. A failure there can only leave `SETUP_FAILED`; it
 can't take the container or sshd down with it.
+
+**Lessons from real runs 2–3:**
+
+- `exited` alone doesn't mean a crash. vast reports a preempted interruptible instance as `exited` with
+  `intended_status=stopped`, so the classification now reads both fields.
+- An SSH key missing from the account wastes a paid run, so it is now a hard pre-rent check. It compares the
+  key material of `~/.ssh/*.pub` and `ssh-add -L` with `vastai show ssh-keys` and prints fingerprints in the
+  same `SHA256:` form sshd logs.
+- `vast/.env` is parsed, not `eval`'d. Explanatory text or `a / b` lines produce a warning and are ignored,
+  instead of breaking bash.
+- `run_limited` must not use a bare `wait` under `set -e`: a killed or failed command would silently exit the
+  caller.
 
 Two more checks now run before renting: `REPO_URL` must be readable anonymously (`git ls-remote`), and your account
 must have an SSH key.

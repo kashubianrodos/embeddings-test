@@ -25,7 +25,7 @@ if ! command -v git >/dev/null; then
 fi
 R=/workspace/embeddings-test
 export GIT_TERMINAL_PROMPT=0
-[ -d "$R/.git" ] || git clone -q -b "$REPO_BRANCH" "$REPO_URL" "$R" || fail "git clone $REPO_URL ($REPO_BRANCH)"
+[ -d "$R/.git" ] || { rm -rf "$R"; git clone -q -b "$REPO_BRANCH" "$REPO_URL" "$R"; } || fail "git clone $REPO_URL ($REPO_BRANCH)"
 git -C "$R" fetch -q origin "$REPO_BRANCH" || fail "git fetch"
 git -C "$R" checkout -q -f "${REPO_COMMIT:-origin/$REPO_BRANCH}" || fail "checkout ${REPO_COMMIT:-$REPO_BRANCH} (pushed?)"
 echo "code at $(git -C "$R" rev-parse --short HEAD); starting setup_$BENCH_MODE.sh"

@@ -213,6 +213,51 @@ def cmd_new_id(_a):
     return 1
 
 
+KEY_RE = re.compile(r"\b(ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-nistp\d+|sk-ssh-ed25519@openssh\.com|"
+                    r"sk-ecdsa-sha2-nistp256@openssh\.com)\s+(AAAA[0-9A-Za-z+/]+=*)")
+
+
+def _fingerprint(blob):
+    import base64
+    import hashlib
+    raw = base64.b64decode(blob + "=" * (-len(blob) % 4))
+    return "SHA256:" + base64.b64encode(hashlib.sha256(raw).digest()).decode().rstrip("=")
+
+
+def cmd_ssh_check(a):
+    """Does any local public key (~/.ssh/*.pub, ssh-agent) match a key in the vast account?
+    exit 0 match, 2 account has no keys, 3 no match, 4 could not read the account."""
+    import glob
+    import os
+    acct_text = open(a.account).read()
+    d = _load_any(acct_text)
+    if isinstance(d, dict) and d.get("error"):
+        print(f"could not list account keys: API error {d.get('status_code')}: {d.get('msg')}")
+        return 4
+    acct = {m.group(2): m.group(1) for m in KEY_RE.finditer(acct_text)}
+    local = {}
+    for p in sorted(glob.glob(os.path.expanduser("~/.ssh/*.pub"))):
+        for m in KEY_RE.finditer(open(p, errors="ignore").read()):
+            local.setdefault(m.group(2), f"{m.group(1)} {os.path.basename(p)}")
+    if a.agent and os.path.exists(a.agent):
+        for m in KEY_RE.finditer(open(a.agent).read()):
+            local.setdefault(m.group(2), f"{m.group(1)} (ssh-agent)")
+    fp = lambda b: _fingerprint(b)
+    if not acct:
+        print("your vast account has NO SSH keys"
+              + (f" (output: {acct_text.strip()[:120]!r})" if acct_text.strip() not in ("", "[]", "{}") else ""))
+        print("local keys: " + ("; ".join(f"{v} {fp(k)}" for k, v in local.items()) or "none in ~/.ssh"))
+        return 2
+    both = [k for k in acct if k in local]
+    if both:
+        print("ok — " + ", ".join(f"{local[k]} {fp(k)}" for k in both) + " is in your vast account")
+        return 0
+    print("none of your local SSH keys is in your vast account")
+    print("  account: " + "; ".join(f"{t} {fp(k)}" for k, t in acct.items()))
+    print("  local:   " + ("; ".join(f"{v} {fp(k)}" for k, v in local.items()) or "none in ~/.ssh"))
+    return 3
+
+
 def cmd_get(a):
     with open(a.file) as f:
         v = json.load(f).get(a.key)
@@ -333,6 +378,10 @@ def main():
     g.add_argument("file")
     g.add_argument("key")
 
+    sc = sub.add_parser("ssh-check")
+    sc.add_argument("--account", required=True, help="file with `vastai show ssh-keys --raw` output")
+    sc.add_argument("--agent", default="", help="file with `ssh-add -L` output")
+
     s = sub.add_parser("summary")
     s.add_argument("--meta", required=True)
     s.add_argument("--events", required=True)
@@ -342,6 +391,7 @@ def main():
 
     a = p.parse_args()
     return {"rank": cmd_rank, "status": cmd_status, "in-list": cmd_in_list, "new-id": cmd_new_id,
+            "ssh-check": cmd_ssh_check,
             "get": cmd_get, "summary": cmd_summary}[a.cmd](a)
 
 

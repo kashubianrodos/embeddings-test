@@ -31,10 +31,20 @@ REMOTE_REFS=$(GIT_TERMINAL_PROMPT=0 run_limited 30 git -c credential.helper= ls-
 if ! printf '%s\n' "$REMOTE_REFS" | grep -q "^$HEAD_SHA"; then
   log "⚠️  Local HEAD ${HEAD_SHA:0:7} is not a branch tip on $REPO_URL — the checkout on the instance may fail if it was never pushed."
 fi
-# SSH needs a key registered in your vast account (added to instances at creation).
-ls "$HOME"/.ssh/*.pub >/dev/null 2>&1 || log "⚠️  No ~/.ssh/*.pub found — SSH to the instance will fail."
-KEYS=$(run_limited 30 vast show ssh-keys --raw 2>/dev/null || true)
-case "$KEYS" in ''|'[]'|'{}') log "⚠️  Could not confirm an SSH key in your vast account (vastai show ssh-keys). Add one: vastai create ssh-key \"\$(cat ~/.ssh/id_ed25519.pub)\"" ;; esac
+# SSH needs one of YOUR keys in the vast account (vast copies account keys into new instances).
+# A run without it is paid for but can never be driven — so this is a hard stop.
+PRE=$(mktemp -d)
+run_limited 30 vast show ssh-keys --raw > "$PRE/account" 2>&1
+ssh-add -L > "$PRE/agent" 2>/dev/null || true
+SSHCHK_RC=0; SSHCHK=$(python3 "$TOOL" ssh-check --account "$PRE/account" --agent "$PRE/agent") || SSHCHK_RC=$?
+rm -rf "$PRE"
+case "$SSHCHK_RC" in
+  0) log "SSH key: $SSHCHK" ;;
+  4) log "⚠️  SSH key check skipped — $SSHCHK" ;;
+  *) printf '%s\n' "$SSHCHK" >&2
+     K=""; for f in "$HOME"/.ssh/id_ed25519.pub "$HOME"/.ssh/id_*.pub; do [ -f "$f" ] && { K=$f; break; }; done
+     die "Add your public key to vast first:  vastai create ssh-key \"\$(cat ${K:-~/.ssh/id_ed25519.pub})\"   (no key? ssh-keygen -t ed25519)" ;;
+esac
 
 [ -f "$STATE_ID" ] && die "An instance is already tracked in $STATE_ID ($(cat "$STATE_ID")). Destroy it first: ./vast/destroy.sh"
 OUTCOME="interrupted"; ID=""
@@ -85,20 +95,27 @@ while :; do
   NOW=$(date +%s)
   if [ "$NOW" -ge "$DEADLINE" ]; then OUTCOME="max_hours"; die "MAX_HOURS=$MAX_HOURS reached."; fi
 
-  ST=$(instance_status "$ID")
-  if [ "$ST" != "$LAST_ST" ]; then
-    MSG=$(instance_msg "$ID"); log "instance status: $ST${MSG:+ — $MSG}"; LAST_ST=$ST
+  J=$(vast show instance "$ID" --raw 2>&1 </dev/null)
+  ST=$(printf '%s' "$J" | python3 "$TOOL" status)
+  INTENDED=$(printf '%s' "$J" | python3 "$TOOL" status --field intended_status)
+  if [ "$ST/$INTENDED" != "$LAST_ST" ]; then
+    MSG=$(printf '%s' "$J" | python3 "$TOOL" status --field status_msg)
+    log "instance status: $ST (intended: ${INTENDED:-?})${MSG:+ — $MSG}"; LAST_ST="$ST/$INTENDED"
   fi
+  # vast stopped it (outbid, or an on-demand renter took the GPU): intended_status=stopped.
+  # Only an exit while vast still intends it to run is a crash.
+  if [ "$ST" = exited ] && [ "$INTENDED" != running ]; then ST=stopped; fi
   case "$ST" in
     gone) OUTCOME="instance_gone"; die "Instance $ID disappeared." ;;
     running) DOWN_SINCE=""; LOADING_SINCE="" ;;
     exited)
       # the container itself died (bad image / entrypoint / host problem) — not an outbid
-      OUTCOME="container_exited"; event container_exited; show_vast_logs
+      OUTCOME="container_exited"; event container_exited intended="$INTENDED"; show_vast_logs
       die "The container exited on its own (not a preemption). See output_vast/$ID/container.log and daemon.log." ;;
     stopped|offline)
       # interruptible instances go to 'stopped' when outbid; storage keeps billing
-      [ -n "$DOWN_SINCE" ] || { DOWN_SINCE=$NOW; event preempted status="$ST"; log "Instance is $ST (outbid/preempted?) — waiting up to ${OUTBID_WAIT_MIN} min"; }
+      [ -n "$DOWN_SINCE" ] || { DOWN_SINCE=$NOW; event preempted status="$ST" intended="$INTENDED"
+        log "Preempted: vast stopped the instance (outbid, or an on-demand renter took the GPU) — waiting up to ${OUTBID_WAIT_MIN} min for it to resume"; }
       if [ $(( NOW - DOWN_SINCE )) -ge $(( OUTBID_WAIT_MIN * 60 )) ]; then
         OUTCOME="preempted"; die "Instance stayed $ST for ${OUTBID_WAIT_MIN} min."
       fi
