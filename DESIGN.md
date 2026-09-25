@@ -69,7 +69,7 @@ There is no daemon and no open port apart from SSH. Each poll is one SSH call th
 | :- | :--- | :--- | :--- |
 | Q6 | Ollama pulls the Hugging Face GGUF with the **full filename** as the tag. | The quality comparison needs a known quantization. The repo contains Q4_K, Q4_K_L and UD-DW-Q4_K_M, so the short tag `:Q4_K` is ambiguous. | The Ollama library tag, whose quantization isn't obvious. It remains a documented manual retry. |
 | Q12 | **Fail fast** when the model won't load: the smoke test fails, logs are fetched, and the instance is destroyed. | A silent fallback to another engine or model would produce numbers for something you didn't ask to test. | Automatic fallback to llama.cpp. |
-| Q7 | Images are pinned: `ollama/ollama:0.34.4` and `vastai/vllm:v0.29.0-cuda-12.9`. | A pinned image removes the "latest broke it" failure and the driver lottery. The engine is preinstalled, so setup only adds python3 and curl on Ollama. The CUDA 12.9 variant runs on more hosts (driver ≥575) than 13.0 (≥580). | `ubuntu` + install script: slower and unpinned. vast's "Open WebUI + Ollama" template: it puts auth in front of the API and adds a UI we don't use. `vllm/vllm-openai:latest`: may need CUDA 13 on a 12.8 host. |
+| Q7 (revised after first real run) | Images are pinned. Ollama runs on `vastai/base-image:stock-ubuntu24.04-py312-2026-09-07` with Ollama **0.34.4** installed by the setup script (`OLLAMA_VERSION`). vLLM runs on `vastai/vllm:v0.29.0-cuda-12.9`. | The first run on `ollama/ollama:0.34.4` never got SSH and the container **exited** after about 2 minutes. vast's docs say SSH mode replaces the entrypoint and "requires that your docker image is compatible with typical ssh daemon setup". Both chosen images are vast's own SSH-mode images, and the Ollama version stays pinned. The install adds about 2 GB and roughly a minute. The CUDA 12.9 vLLM variant runs on more hosts (driver ≥575) than 13.0 (≥580). | `ollama/ollama` as the base image: it failed in SSH mode, though the exact cause couldn't be recovered because no logs were fetched. vast's "Open WebUI + Ollama" template: it puts auth in front of the API. `vllm/vllm-openai:latest`: may need CUDA 13. |
 | – | Nothing the `vastai/vllm` image reads (`VLLM_MODEL`, `VLLM_ARGS`) is set. `setup_vllm.sh` starts `vllm serve` itself on port 8011. | The image's supervisor stays idle when `VLLM_MODEL` is unset. Owning the process gives us one log, one port with no vast proxy auth in front of it, and control over flags and revision. | Letting the template start vLLM. That adds an auth proxy and moves the log somewhere else. |
 | – | The vLLM weights are downloaded as a separate step before `vllm serve`. | The run summary can then report real download throughput, which tunes the cost model. | Letting `vllm serve` download them, which mixes the download into load time. |
 
@@ -120,15 +120,34 @@ speed (and hence NET_EFFICIENCY), phase durations and actual cost to `run_summar
 
 | Situation | Detected by | Result |
 | :--- | :--- | :--- |
+| Container exits on its own (`exited`) | `show instance` | Show `status_msg` + `vastai logs`, fetch, destroy. **Not** treated as a preemption (the first real run lost 15 min waiting on this) |
+| Running, but no SSH for `SSH_WAIT_MIN` | poll | Show vast logs, fetch, destroy (usually a missing SSH key) |
+| Stuck `loading` for `LOAD_WAIT_MIN` | `show instance` | Show vast logs, fetch, destroy |
 | No offer passes the filters | the ranker returns nothing | Refuse to rent; suggest which filters to relax |
 | Estimate > `MAX_RUN_USD` | `launch.sh` | Refuse to rent |
 | Clone or checkout fails (unpushed commit, private repo) | `onstart.sh` → `SETUP_FAILED` | Fetch logs, destroy |
 | Model won't load (e.g. Ollama `qwen35` or mmproj issue, FP8 kernel) | smoke test → `SETUP_FAILED` | Fetch logs, destroy, print the retry hint |
 | SSH connection drops | the benchmark runs under `nohup` | Polling continues |
-| Outbid or preempted (`stopped`) | `show instance` | Wait `OUTBID_WAIT_MIN`, then resume (rerun the benchmark once) or fetch and destroy |
+| Outbid or preempted (`stopped`/`offline`) | `show instance` | Wait `OUTBID_WAIT_MIN`, then resume (rerun the benchmark once) or fetch and destroy |
 | Hang anywhere | `MAX_HOURS` | Fetch whatever exists, destroy |
 | Ctrl-C | INT trap | Fetch, destroy |
 | Destroy not confirmed | `show instance` still lists the instance after 3 attempts | Loud warning with the instance id |
+
+**Cleanup can never block.** In the first real run, the log-fetch fallback (`vastai copy`, which uses rsync to the
+host) prompted for a password and hung before the destroy, so the instance had to be stopped by hand. Now:
+
+- that fallback is gone;
+- SSH runs with `BatchMode=yes`;
+- every cleanup step runs under a watchdog (`run_limited`, since bash 3.2 has no `timeout`);
+- the whole fetch is capped at `FETCH_TIMEOUT`, and the destroy follows in any case;
+- vast's container and daemon logs are fetched over the HTTPS API (`vastai logs`), which works without SSH.
+
+`onstart.sh` runs as part of vast's SSH-mode entrypoint, so its top level no longer does anything that could exit,
+exec or block. It writes `bootstrap.sh` and starts it detached. A failure there can only leave `SETUP_FAILED`; it
+can't take the container or sshd down with it.
+
+Two more checks now run before renting: `REPO_URL` must be readable anonymously (`git ls-remote`), and your account
+must have an SSH key.
 
 The CLI's exit codes are not trusted (`vastai destroy` exits 0 on API errors). Success is decided by re-reading
 `show instance`. If that read fails, the status is `unknown`, never `gone`.
@@ -161,14 +180,16 @@ These were verified:
 
 Not yet confirmed; each first run checks these:
 
-1. Whether Ollama 0.34.4 loads this GGUF when the repo also has an mmproj file. Earlier versions failed (ollama#14730,
+1. Why `ollama/ollama` exited in SSH mode on the first real run. The next failure of this kind will ship
+   `container.log` and `daemon.log`.
+2. Whether Ollama 0.34.4 loads this GGUF when the repo also has an mmproj file. Earlier versions failed (ollama#14730,
    fixed in the 0.30 line according to third-party reports).
-2. Whether upstream vLLM 0.29 loads the leoncca FP8 checkpoint. Its card only mentions a V100 fork. The format is
+3. Whether upstream vLLM 0.29 loads the leoncca FP8 checkpoint. Its card only mentions a V100 fork. The format is
    standard block FP8, so it probably works.
-3. Whether `--language-model-only` is accepted by v0.29 for `qwen3_5`. It is documented in the Qwen3.5 recipe.
-4. The exact meaning of `min_bid` and `dph_total` for bid offers. The cost math assumes `min_bid` is the machine's
+4. Whether `--language-model-only` is accepted by v0.29 for `qwen3_5`. It is documented in the Qwen3.5 recipe.
+5. The exact meaning of `min_bid` and `dph_total` for bid offers. The cost math assumes `min_bid` is the machine's
    GPU price and adds storage on top. The measured cost in `run_summary.md` will show if this is off.
-5. The vast.ai prices quoted in the README come from third-party trackers, not live listings.
+6. The vast.ai prices quoted in the README come from third-party trackers, not live listings.
 
 ## 8. Possible next steps
 

@@ -4,8 +4,9 @@
 #
 #   ./vast/bench.sh ollama|vllm [--interruptible|--on-demand] [--quick] [--yes]
 #
-# The instance is destroyed on every exit path (success, failure, Ctrl-C, MAX_HOURS,
-# preempted longer than OUTBID_WAIT_MIN) — always after trying to fetch the logs.
+# The instance is destroyed on every exit path (success, failure, Ctrl-C, MAX_HOURS, container
+# exited, no SSH for SSH_WAIT_MIN, preempted longer than OUTBID_WAIT_MIN) — always after trying
+# to fetch the logs, and nothing in cleanup can block (every step is time-limited, no prompts).
 set -euo pipefail
 # shellcheck source=vast/common.sh
 . "$(dirname "$0")/common.sh"
@@ -23,6 +24,17 @@ if git -C "$ROOT_DIR" rev-parse '@{u}' >/dev/null 2>&1; then
   AHEAD=$(git -C "$ROOT_DIR" rev-list --count '@{u}..HEAD')
   [ "$AHEAD" = 0 ] || die "Local branch is $AHEAD commit(s) ahead of its upstream. git push first — the instance clones $REPO_URL."
 fi
+# The instance clones anonymously: check REPO_URL is readable without credentials and has HEAD.
+HEAD_SHA=$(git -C "$ROOT_DIR" rev-parse HEAD)
+REMOTE_REFS=$(GIT_TERMINAL_PROMPT=0 run_limited 30 git -c credential.helper= ls-remote "$REPO_URL" 2>/dev/null) \
+  || die "Cannot read $REPO_URL anonymously (private repo?). The instance must be able to git clone it."
+if ! printf '%s\n' "$REMOTE_REFS" | grep -q "^$HEAD_SHA"; then
+  log "⚠️  Local HEAD ${HEAD_SHA:0:7} is not a branch tip on $REPO_URL — the checkout on the instance may fail if it was never pushed."
+fi
+# SSH needs a key registered in your vast account (added to instances at creation).
+ls "$HOME"/.ssh/*.pub >/dev/null 2>&1 || log "⚠️  No ~/.ssh/*.pub found — SSH to the instance will fail."
+KEYS=$(run_limited 30 vast show ssh-keys --raw 2>/dev/null || true)
+case "$KEYS" in ''|'[]'|'{}') log "⚠️  Could not confirm an SSH key in your vast account (vastai show ssh-keys). Add one: vastai create ssh-key \"\$(cat ~/.ssh/id_ed25519.pub)\"" ;; esac
 
 [ -f "$STATE_ID" ] && die "An instance is already tracked in $STATE_ID ($(cat "$STATE_ID")). Destroy it first: ./vast/destroy.sh"
 OUTCOME="interrupted"; ID=""
@@ -32,9 +44,9 @@ cleanup() {
   set +e
   [ -n "$ID" ] || { [ -f "$STATE_ID" ] && ID=$(cat "$STATE_ID"); }
   if [ -n "$ID" ]; then
-    log "Cleaning up instance $ID (outcome: $OUTCOME) — fetching logs, then destroying"
-    OUTCOME="$OUTCOME" "$VAST_DIR/fetch_results.sh" "$ID"
-    "$VAST_DIR/destroy.sh" -y "$ID"
+    log "Cleaning up instance $ID (outcome: $OUTCOME) — fetching logs (max ${FETCH_TIMEOUT}s), then destroying"
+    OUTCOME="$OUTCOME" run_limited "$FETCH_TIMEOUT" "$VAST_DIR/fetch_results.sh" "$ID" || log "Fetching logs failed or timed out — destroying anyway"
+    run_limited 240 "$VAST_DIR/destroy.sh" -y "$ID" || printf '\n🚨 Destroy did not complete for instance %s — check https://cloud.vast.ai/instances/ NOW.\n' "$ID" >&2
   fi
   exit $rc
 }
@@ -51,7 +63,7 @@ DEADLINE=$(( $(date +%s) + $(secs_from_hours "$MAX_HOURS") ))
 
 remote_state() {
   # shellcheck disable=SC2016  # expands on the instance, not here
-  remote "$ID" 'W=/workspace
+  run_limited 60 remote "$ID" 'W=/workspace
     if   [ -f $W/SETUP_FAILED ]; then echo SETUP_FAILED
     elif [ -f $W/BENCH_DONE ]; then echo BENCH_DONE
     elif [ -f $W/BENCH_FAILED ]; then echo BENCH_FAILED
@@ -60,31 +72,59 @@ remote_state() {
     else echo SETUP; fi' 2>/dev/null || echo UNREACHABLE
 }
 
-BENCH_STARTS=0; DOWN_SINCE=""; LAST=""
+show_vast_logs() {  # why did the container die / never get SSH? (API, works without SSH)
+  local msg; msg=$(instance_msg "$ID")
+  [ -n "$msg" ] && log "vast status_msg: $msg"
+  log "Last container log lines (vastai logs $ID):"
+  run_limited 45 vast logs "$ID" --tail 25 2>&1 | sed 's/^/    /' >&2 || true
+}
+
+BENCH_STARTS=0; DOWN_SINCE=""; NOSSH_SINCE=""; LOADING_SINCE=""; LAST=""; LAST_ST=""
+LOAD_WAIT_MIN=${LOAD_WAIT_MIN:-20}
 while :; do
   NOW=$(date +%s)
   if [ "$NOW" -ge "$DEADLINE" ]; then OUTCOME="max_hours"; die "MAX_HOURS=$MAX_HOURS reached."; fi
 
   ST=$(instance_status "$ID")
+  if [ "$ST" != "$LAST_ST" ]; then
+    MSG=$(instance_msg "$ID"); log "instance status: $ST${MSG:+ — $MSG}"; LAST_ST=$ST
+  fi
   case "$ST" in
     gone) OUTCOME="instance_gone"; die "Instance $ID disappeared." ;;
-    running) DOWN_SINCE="" ;;
-    stopped|exited|offline)
+    running) DOWN_SINCE=""; LOADING_SINCE="" ;;
+    exited)
+      # the container itself died (bad image / entrypoint / host problem) — not an outbid
+      OUTCOME="container_exited"; event container_exited; show_vast_logs
+      die "The container exited on its own (not a preemption). See output_vast/$ID/container.log and daemon.log." ;;
+    stopped|offline)
       # interruptible instances go to 'stopped' when outbid; storage keeps billing
       [ -n "$DOWN_SINCE" ] || { DOWN_SINCE=$NOW; event preempted status="$ST"; log "Instance is $ST (outbid/preempted?) — waiting up to ${OUTBID_WAIT_MIN} min"; }
       if [ $(( NOW - DOWN_SINCE )) -ge $(( OUTBID_WAIT_MIN * 60 )) ]; then
         OUTCOME="preempted"; die "Instance stayed $ST for ${OUTBID_WAIT_MIN} min."
       fi
       sleep "$POLL"; continue ;;
-    *) ;;  # loading / created / unknown: image still pulling
+    *)  # loading / created / unknown: image still pulling
+      [ -n "$LOADING_SINCE" ] || LOADING_SINCE=$NOW
+      if [ $(( NOW - LOADING_SINCE )) -ge $(( LOAD_WAIT_MIN * 60 )) ]; then
+        OUTCOME="stuck_loading"; show_vast_logs; die "Instance not running after ${LOAD_WAIT_MIN} min (status: $ST)."
+      fi ;;
   esac
 
   RS=SETUP; [ "$ST" = running ] && RS=$(remote_state)
   [ "$RS" != "$LAST" ] && { log "instance=$ST remote=$RS"; LAST=$RS; }
+  if [ "$RS" = UNREACHABLE ]; then
+    [ -n "$NOSSH_SINCE" ] || NOSSH_SINCE=$NOW
+    if [ $(( NOW - NOSSH_SINCE )) -ge $(( SSH_WAIT_MIN * 60 )) ]; then
+      OUTCOME="ssh_unreachable"; show_vast_logs
+      die "Running but no SSH for ${SSH_WAIT_MIN} min. Is your SSH key in the vast account (vastai show ssh-keys)?"
+    fi
+  else
+    NOSSH_SINCE=""
+  fi
   case "$RS" in
     SETUP_FAILED)
       OUTCOME="setup_failed"
-      remote "$ID" 'tail -n 25 /workspace/setup.log /workspace/onstart.log' 2>/dev/null || true
+      run_limited 60 remote "$ID" 'tail -n 25 /workspace/setup.log /workspace/onstart.log' 2>/dev/null || true
       die "Setup failed on the instance (logs will be in output_vast/$ID/)." ;;
     READY)
       [ "$BENCH_STARTS" = 0 ] && event ready
@@ -92,13 +132,13 @@ while :; do
       BENCH_STARTS=$((BENCH_STARTS + 1))
       log "Starting benchmark (attempt $BENCH_STARTS)"
       event bench_start attempt="$BENCH_STARTS"
-      remote "$ID" 'cd /workspace/embeddings-test && nohup bash vast/run_llm_bench.sh >> /workspace/bench.log 2>&1 < /dev/null &' \
+      run_limited 60 remote "$ID" 'cd /workspace/embeddings-test && nohup bash vast/run_llm_bench.sh >> /workspace/bench.log 2>&1 < /dev/null &' \
         || log "Could not start the benchmark over SSH; will retry"
       ;;
     BENCH_DONE)   event bench_done; OUTCOME="success"; log "Benchmark finished."; break ;;
     BENCH_FAILED)
       OUTCOME="bench_failed"
-      remote "$ID" 'tail -n 30 /workspace/bench.log' 2>/dev/null || true
+      run_limited 60 remote "$ID" 'tail -n 30 /workspace/bench.log' 2>/dev/null || true
       die "Benchmark failed (logs will be in output_vast/$ID/)." ;;
     *) ;;  # SETUP / BENCH_RUNNING / UNREACHABLE: keep waiting
   esac

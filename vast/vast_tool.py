@@ -125,7 +125,7 @@ def cmd_rank(a):
 
 
 # ----------------------------------------------------------------------------- small helpers
-def cmd_status(_a):
+def cmd_status(a):
     d = _load_any(sys.stdin.read())
     if d is None:                      # CLI/API error or empty output: don't conclude anything
         print("unknown")
@@ -137,7 +137,8 @@ def cmd_status(_a):
     if not isinstance(d, dict) or not d:
         print("gone")                  # explicit {"instances": null} / empty list
     else:
-        print(d.get("actual_status") or "unknown")
+        v = d.get(a.field) if a.field else d.get("actual_status")
+        print(v if v not in (None, "") else ("" if a.field else "unknown"))
     return 0
 
 
@@ -264,7 +265,8 @@ def main():
     r.add_argument("--offer-id", default="")
     r.add_argument("--top", type=int, default=10)
 
-    sub.add_parser("status")
+    st = sub.add_parser("status")
+    st.add_argument("--field", default="", help="print this field instead of actual_status")
     sub.add_parser("new-id")
     g = sub.add_parser("get")
     g.add_argument("file")

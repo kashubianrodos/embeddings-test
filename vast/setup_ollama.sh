@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs ON the instance (image ollama/ollama:<pinned>, started by onstart.sh).
+# Runs ON the instance (vast base image, started by onstart.sh → bootstrap.sh).
 # Starts Ollama, pulls the GGUF, prepares Python, smoke-tests, then touches /workspace/READY.
 # Idempotent: after a preemption/resume it reuses the downloaded model.
 set -euo pipefail
@@ -17,24 +17,30 @@ export OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_KEEP_ALIVE=1h
 export OLLAMA_MODELS="${OLLAMA_MODELS:-$W/ollama-models}"
 export OLLAMA_HOST=127.0.0.1:11434
 
-# ollama/ollama ships no python3/curl; everything else is already in the image.
 export DEBIAN_FRONTEND=noninteractive
-if ! command -v python3 >/dev/null || ! command -v curl >/dev/null || ! python3 -c 'import venv' 2>/dev/null; then
-  apt-get update -qq
-  apt-get install -y -qq curl ca-certificates git python3 python3-venv procps pciutils >/dev/null
+NEED=""
+for c in curl zstd pgrep; do command -v $c >/dev/null || NEED=1; done
+python3 -c 'import venv, ensurepip' 2>/dev/null || NEED=1
+if [ -n "$NEED" ]; then
+  apt-get update -qq || echo "apt-get update had errors; trying install anyway"
+  apt-get install -y -qq curl ca-certificates git python3 python3-venv procps pciutils zstd >/dev/null
 fi
 mark packages_done
 
-if ! command -v ollama >/dev/null; then  # only if someone overrides OLLAMA_IMAGE with a plain OS image
-  apt-get install -y -qq zstd >/dev/null
-  curl -fsSL https://ollama.com/install.sh | sh
+# Pinned Ollama (OLLAMA_VERSION). Skipped if the right version is already there
+# (e.g. on resume after preemption).
+WANT="${OLLAMA_VERSION:-0.34.4}"
+HAVE=$(ollama --version 2>/dev/null | awk '{print $NF}' | tail -n1 || true)
+if [ "$HAVE" != "$WANT" ]; then
+  mark engine_download_start version="$WANT"
+  curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION="$WANT" sh
 fi
 if ! pgrep -x ollama >/dev/null; then
   nohup ollama serve >> "$W/ollama.log" 2>&1 &
 fi
 for _ in $(seq 60); do curl -sf localhost:11434/api/version >/dev/null && break; sleep 2; done
 curl -sf localhost:11434/api/version >/dev/null || { tail -n 50 "$W/ollama.log"; exit 1; }
-mark engine_ready version="$(ollama --version 2>/dev/null | awk '{print $NF}')"
+mark engine_ready version="$(ollama --version 2>/dev/null | awk '{print $NF}' | tail -n1)"
 
 mark download_start
 ollama pull "$MODEL"

@@ -90,7 +90,9 @@ actual cost afterwards (`run_summary.md`).
 
 ### One-time setup (on your machine)
 
-1. Create a vast.ai account, add credit, and add your **SSH public key** under Account → SSH Keys.
+1. Create a vast.ai account, add credit, and add your **SSH public key** under Account → SSH Keys
+   (or `vastai create ssh-key "$(cat ~/.ssh/id_ed25519.pub)"`). Without it the run fails after
+   `SSH_WAIT_MIN` with "no SSH".
 2. Install the CLI and store your API key:
    ```bash
    pip install -r requirements-vast.txt
@@ -125,13 +127,18 @@ What happens:
 2. **Guard.** If that estimate exceeds `MAX_RUN_USD_OLLAMA` ($3) or `MAX_RUN_USD_VLLM` ($6), it refuses to rent.
 3. **Rent.** It creates the instance with a pinned image. All settings travel in a single env var, and the
    instance bootstraps itself with `vast/onstart.sh` and then `vast/setup_<mode>.sh`.
-4. **Wait for READY.** It polls every 30 s. If the setup script fails (for example, the model doesn't load), the run
-   stops immediately. There is no automatic fallback.
+4. **Wait for READY.** It polls every 30 s and prints vast's status message whenever the status changes.
+   The run stops immediately (fetch logs, destroy) when:
+   - the setup script fails, for example because the model doesn't load. There is no automatic fallback.
+   - the container **exits** on its own. That is a crash, not a preemption.
+   - the machine is running but has no SSH for `SSH_WAIT_MIN` (10 min).
+   - it is still loading after `LOAD_WAIT_MIN` (20 min).
 5. **Benchmark.** `vast/run_llm_bench.sh` runs on the instance under `nohup`, so a dropped SSH connection doesn't
    kill it. If an interruptible instance is preempted mid-run, the script waits up to `OUTBID_WAIT_MIN` (15 min) for
    it to resume, then reruns the benchmark once.
 6. **Always:** it fetches logs and reports into `output_vast/<instance-id>/`, writes `run_summary.md`, and **destroys
-   the instance**. It then verifies the instance is gone and prints a loud warning if it can't confirm that. This
+   the instance**. Fetching is capped at `FETCH_TIMEOUT` (180 s) and never prompts, so it can't block the destroy.
+   vast's container and daemon logs come from the API, so they arrive even when SSH never worked. It then verifies the instance is gone and prints a loud warning if it can't confirm that. This
    happens on success, on failure, on Ctrl-C, when `MAX_HOURS` (3 h) is reached, and after a preemption that doesn't
    resume.
 
@@ -144,7 +151,8 @@ What happens:
 | `llm_speed_*.md/json`, `llm_load_*.md/json`, `llm_quality_*.md/json` | Benchmark reports. File names carry the GPU and mode, e.g. `RTX-4090-ollama-q4k` |
 | `gpu_log_*.csv` | Per-second GPU utilization, VRAM, power and temperature |
 | `run_summary.md/json` | Estimated vs. actual cost, phase durations, measured download speed |
-| `setup.log`, `onstart.log`, `bench.log`, `ollama.log`/`vllm.log`, `timings.log`, `local_events.log` | Everything needed to debug a failed run |
+| `container.log`, `daemon.log`, `instance_final.json` | vast's own view of the run (from the API): why a container died or never got SSH |
+| `setup.log`, `onstart.log`, `bench.log`, `ollama.log`/`vllm.log`, `timings.log`, `local_events.log` | Everything needed to debug a failed run (only if SSH worked) |
 
 Use `run_summary.md` to tune the cost model: it reports the measured `NET_EFFICIENCY` and phase durations. Put
 better values for `NET_EFFICIENCY`, `SETUP_HOURS` and `BENCH_HOURS_*` into `vast/.env`.
@@ -222,18 +230,23 @@ Shared flags: `--backend ollama|openai --model … --base-url … --think --num-
 
 ### Troubleshooting
 
+- **"An instance is already tracked"**: a previous run didn't finish cleanup. `./vast/destroy.sh -y <id>` destroys
+  it (if it still exists), verifies it's gone, and clears the local state.
+- **"The container exited on its own"**: read `output_vast/<id>/container.log` and `daemon.log`. Common causes are an
+  image that isn't compatible with vast's SSH launch mode, or a host problem. Retry and the ranker picks the next host,
+  or exclude the host with `EXTRA_QUERY='machine_id!=<id>'`.
+- **"no SSH for 10 min"**: check that your key is registered with `vastai show ssh-keys`.
 - **"ahead of its upstream"**: run `git push`. The instance can only run pushed code.
 - **"No usable offer"**: loosen the filters. Try `MAX_INET_DOWN_COST`, `MIN_INET_DOWN_*`, `EXTRA_QUERY`, a different
   `GPU_NAME`, or `--on-demand`.
 - **"Cheapest run is estimated at … > MAX_RUN_USD"**: raise the cap in `vast/.env` or relax the filters.
 - **Ollama setup failed on the smoke test** (for example `unknown model architecture`, or a problem with the vision
-  file `mmproj`): the pinned Ollama version couldn't load this GGUF. Retry with the Ollama-library build, or pin a
-  newer image:
-  `LLM_MODEL=huihui_ai/Qwen3.8-abliterated ./vast/bench.sh ollama` or `OLLAMA_IMAGE=ollama/ollama:<newer> …`.
+  file `mmproj`): the pinned Ollama version couldn't load this GGUF. Retry with the Ollama-library build
+  (`LLM_MODEL=huihui_ai/Qwen3.8-abliterated ./vast/bench.sh ollama`) or a newer Ollama (`OLLAMA_VERSION=<newer> …`).
 - **vLLM fails to load the FP8 checkpoint**: the third-party checkpoint has only been validated on another vLLM fork.
   Check `vllm.log`, try a newer `VLLM_IMAGE`, or use `VLLM_PRESET=bf16`.
 - **vLLM out of memory**: lower `VLLM_MAX_MODEL_LEN` or `VLLM_GPU_MEM_UTIL`.
 - **Ollama slow or partly offloaded to CPU**: `ollama.log` shows the layer split. Lower `OLLAMA_NUM_PARALLEL` or
   `OLLAMA_CONTEXT_LENGTH`, or set `OLLAMA_KV_CACHE_TYPE=q8_0`.
-- **"COULD NOT CONFIRM DESTROY"**: check `vastai show instances` or the web console right away. Storage bills even
+- **"COULD NOT CONFIRM DESTROY"** or **"Destroy did not complete"**: check `vastai show instances` or the web console right away. Storage bills even
   while an instance is stopped.

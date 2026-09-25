@@ -24,7 +24,7 @@ export HF_HOME="${HF_HOME:-$W/hf}"
 if [ -x /venv/main/bin/python ]; then PY=/venv/main/bin/python; else PY=$(command -v python3); fi
 if [ -x /venv/main/bin/vllm ]; then VLLM=/venv/main/bin/vllm; else VLLM=$(command -v vllm || true); fi
 [ -n "$VLLM" ] || { echo "vllm not found in this image — VLLM_IMAGE must be a vastai/vllm (or vllm-openai) image"; exit 1; }
-command -v curl >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl procps >/dev/null; }
+command -v curl >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl procps >/dev/null; }
 "$PY" -c 'import requests' 2>/dev/null || "$PY" -m pip install -q -r requirements-llm.txt \
   || uv pip install --python "$PY" -q -r requirements-llm.txt
 mark packages_done

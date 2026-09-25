@@ -13,7 +13,7 @@ if [ "$YES" != 1 ]; then
 fi
 
 for attempt in 1 2 3; do
-  vast destroy instance "$ID" -y --raw >/dev/null 2>&1
+  run_limited 60 vast destroy instance "$ID" -y --raw >/dev/null 2>&1
   for _ in 1 2 3 4 5 6; do
     if [ "$(instance_status "$ID")" = gone ]; then
       [ "$(cat "$STATE_ID" 2>/dev/null)" = "$ID" ] && rm -f "$STATE_ID" "$STATE_MODE" "$STATE_META" "$STATE_EVENTS"

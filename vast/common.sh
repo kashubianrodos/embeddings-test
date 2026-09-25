@@ -58,16 +58,21 @@ resolve_config() {
   OFFER_ID="${OFFER_ID:-}"
   EXTRA_QUERY="${EXTRA_QUERY:-}"
   GPU_NAME="${GPU_NAME:-}"
+  SSH_WAIT_MIN="${SSH_WAIT_MIN:-10}"
+  FETCH_TIMEOUT="${FETCH_TIMEOUT:-180}"
 
   if [ "$MODE" = ollama ]; then
     INTERRUPTIBLE="${INTERRUPTIBLE:-1}"
     MAX_RUN_USD="${MAX_RUN_USD_OLLAMA:-3}"
     BENCH_HOURS="${BENCH_HOURS_OLLAMA:-0.75}"
     MIN_INET_DOWN="${MIN_INET_DOWN_OLLAMA:-500}"
-    IMAGE="${OLLAMA_IMAGE:-ollama/ollama:0.34.4}"
+    # vast's own base image: built for SSH launch mode (sshd, onstart). Ollama is installed
+    # at a pinned version by setup_ollama.sh (ollama/ollama failed in SSH mode — DESIGN.md Q7).
+    IMAGE="${OLLAMA_IMAGE:-vastai/base-image:stock-ubuntu24.04-py312-2026-09-07}"
+    OLLAMA_VERSION="${OLLAMA_VERSION:-0.34.4}"
     CUDA_MIN="${OLLAMA_CUDA_MIN:-12.4}"
     DISK_GB="${OLLAMA_DISK_GB:-40}"
-    DOWNLOAD_GB="${OLLAMA_DOWNLOAD_GB:-20}"
+    DOWNLOAD_GB="${OLLAMA_DOWNLOAD_GB:-22}"
     LLM_MODEL="${LLM_MODEL:-${OLLAMA_LLM_MODEL:-hf.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf}}"
     LLM_REVISION=""
     OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-4}"
@@ -119,7 +124,7 @@ remote_env_b64() {
   local k v
   {
     for k in BENCH_MODE BENCH_LABEL LLM_MODEL LLM_REVISION REPO_URL REPO_BRANCH REPO_COMMIT QUICK HF_TOKEN \
-             OLLAMA_NUM_PARALLEL OLLAMA_CONTEXT_LENGTH OLLAMA_KV_CACHE_TYPE \
+             OLLAMA_VERSION OLLAMA_NUM_PARALLEL OLLAMA_CONTEXT_LENGTH OLLAMA_KV_CACHE_TYPE \
              VLLM_MAX_MODEL_LEN VLLM_GPU_MEM_UTIL VLLM_TP VLLM_EXTRA_ARGS; do
       v="${!k-}"
       [ -n "$v" ] || continue
@@ -137,16 +142,33 @@ current_id() {
   cat "$STATE_ID"
 }
 
-instance_status() {  # prints actual_status, or "gone"
-  vast show instance "$1" --raw 2>/dev/null | python3 "$TOOL" status
+instance_status() {  # prints actual_status, "gone", or "unknown" (API error)
+  vast show instance "$1" --raw 2>/dev/null </dev/null | python3 "$TOOL" status
+}
+instance_msg() {     # vast's status_msg (why a container exited / is loading)
+  vast show instance "$1" --raw 2>/dev/null </dev/null | python3 "$TOOL" status --field status_msg
+}
+
+# run_limited <seconds> <cmd...>: run cmd, kill it after <seconds>. bash 3.2 has no `timeout`.
+# Nothing in cleanup may block forever (a password prompt once hung the whole run).
+run_limited() {
+  local secs="$1"; shift
+  "$@" </dev/null &
+  local pid=$!
+  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null; sleep 5; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  local watchdog=$!
+  wait "$pid"; local rc=$?
+  kill "$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null
+  return $rc
 }
 
 # SSH to ephemeral vast hosts: IPs/ports get reused, so don't pollute known_hosts.
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+# BatchMode=yes: never prompt for a password — fail instead.
+SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4"
 
 ssh_target() {  # sets SSH_USERHOST, SSH_PORT
   local url hp
-  url=$(vast ssh-url "$1" 2>/dev/null) || return 1
+  url=$(vast ssh-url "$1" 2>/dev/null </dev/null) || return 1
   case "$url" in ssh://*) ;; *) return 1 ;; esac
   hp="${url#ssh://}"
   SSH_USERHOST="${hp%:*}"
