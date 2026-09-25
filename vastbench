@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Entry point for the vast.ai LLM benchmark CLI (vast/cli.py). Needs: pip install -r requirements-vast.txt
+exec python3 "$(dirname "$0")/vast/cli.py" "$@"

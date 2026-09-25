@@ -182,6 +182,15 @@ resolve_config() {
     VLLM_TP="${VLLM_TP:-}"
     VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:---language-model-only --kv-cache-dtype fp8 --reasoning-parser qwen3}"
   fi
+  # Explicit per-run choices from vast/cli.py (model / cards / disk picked there). They win over
+  # the presets above and over vast/.env, so one CLI invocation fully describes the run.
+  [ -n "${RUN_MODEL:-}" ]        && LLM_MODEL=$RUN_MODEL
+  [ -n "${RUN_REVISION:-}" ]     && LLM_REVISION=$RUN_REVISION
+  [ -n "${RUN_GPU_FILTER:-}" ]   && GPU_FILTER=$RUN_GPU_FILTER
+  [ -n "${RUN_DISK_GB:-}" ]      && DISK_GB=$RUN_DISK_GB
+  [ -n "${RUN_DOWNLOAD_GB:-}" ]  && DOWNLOAD_GB=$RUN_DOWNLOAD_GB
+  [ -n "${RUN_BENCH_HOURS:-}" ]  && BENCH_HOURS=$RUN_BENCH_HOURS
+  [ -n "${RUN_LABEL:-}" ]        && PRESET=$RUN_LABEL
   BENCH_MODE="$MODE"
   BENCH_LABEL="$MODE-$PRESET"
 

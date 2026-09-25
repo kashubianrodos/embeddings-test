@@ -3,7 +3,7 @@
 # checks it against the budget, and rents it. Setup then starts by itself (onstart.sh).
 # Normally called by ./vast/bench.sh; run it directly only for step-by-step debugging.
 #
-#   ./vast/launch.sh ollama|vllm [--preset NAME] [--interruptible|--on-demand] [--yes] [--quick]
+#   ./vast/launch.sh ollama|vllm [--preset NAME] [--interruptible|--on-demand] [--yes] [--quick] [--dry-run]
 #     presets: ollama → q4k (default, Qwen3.8-27B Q4_K) | bielik-1.5b;  vllm → fp8 (default) | bf16
 #
 # All knobs: vast/.env.example.  Why: DESIGN.md.
@@ -18,6 +18,7 @@ while [ $# -gt 0 ]; do
     --on-demand)     INTERRUPTIBLE=0 ;;
     --yes|-y)        ASSUME_YES=1 ;;
     --quick)         QUICK=1 ;;
+    --dry-run)       DRY_RUN=1 ;;
     --preset)        shift; [ -n "${1:-}" ] || die "--preset needs a name"
                      if [ "$MODE_ARG" = vllm ]; then VLLM_PRESET=$1; else OLLAMA_PRESET=$1; fi ;;
     --preset=*)      if [ "$MODE_ARG" = vllm ]; then VLLM_PRESET=${1#--preset=}; else OLLAMA_PRESET=${1#--preset=}; fi ;;
@@ -29,7 +30,7 @@ resolve_config "$MODE_ARG"
 
 need vastai "Install the CLI locally: pip install -r requirements-vast.txt, then: vastai set api-key <KEY>"
 need python3 "Needed for offer ranking."
-[ -f "$STATE_ID" ] && die "An instance is already tracked in $STATE_ID ($(cat "$STATE_ID")). Destroy it first: ./vast/destroy.sh"
+[ -f "$STATE_ID" ] && [ "${DRY_RUN:-0}" != 1 ] && die "An instance is already tracked in $STATE_ID ($(cat "$STATE_ID")). Destroy it first: ./vast/destroy.sh"
 
 REPO_COMMIT=$(git -C "$ROOT_DIR" rev-parse HEAD)
 
@@ -53,10 +54,14 @@ python3 "$TOOL" rank --offers "$TMP/offers.json" --out "$TMP/chosen.json" \
 get() { python3 "$TOOL" get "$TMP/chosen.json" "$1"; }
 OFFER=$(get offer_id); EST=$(get est_total_usd); PRICE=$(get price_h); BID=$(get bid_price)
 OVER=$(awk -v e="$EST" -v m="$MAX_RUN_USD" 'BEGIN{print (e > m) ? 1 : 0}')
-[ "$OVER" = 1 ] && die "Cheapest run is estimated at \$$EST > MAX_RUN_USD \$$MAX_RUN_USD. Raise the cap or relax filters."
 
 echo >&2
 log "Chosen offer $OFFER: $(get gpu_name), \$$PRICE/h ($KIND${BID:+, bid \$$BID}), est. $(get est_hours) h → \$$EST (cap \$$MAX_RUN_USD)"
+if [ "${DRY_RUN:-0}" = 1 ]; then
+  [ "$OVER" = 1 ] && log "⚠️  above MAX_RUN_USD — a real run would refuse to rent"
+  log "Dry run — nothing rented."; exit 0
+fi
+[ "$OVER" = 1 ] && die "Cheapest run is estimated at \$$EST > MAX_RUN_USD \$$MAX_RUN_USD. Raise the cap or relax filters."
 if [ "$ASSUME_YES" != 1 ]; then
   read -r -p "Rent offer $OFFER? [y/N] " ans; [[ "$ans" =~ ^[Yy]$ ]] || exit 0
 fi

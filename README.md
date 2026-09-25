@@ -110,6 +110,37 @@ actual cost afterwards (`run_summary.md`).
 
 ### Run
 
+The easiest way is the `./vastbench` command (Python + Typer). It asks which model, which cards and how
+much disk to use; pressing Enter at a question takes the default shown.
+
+```bash
+./vastbench models                          # the model list: engine, size, min VRAM, default cards, disk
+./vastbench bench                           # pick model → cards → disk interactively, then run
+./vastbench bench bielik-1.5b-q8 --yes      # no questions: model defaults, rent without confirming
+./vastbench bench qwen3.8-27b-q4k -g 4090 -g 5090 --disk 50 --quick
+./vastbench offers bielik-11b               # show ranked offers + estimated cost, rent nothing
+./vastbench cards qwen3.8-27b-fp8           # which cards a model fits on
+./vastbench results                         # past runs; `results <id>` shows one summary
+./vastbench ssh 'tail -f /workspace/setup.log' · status · fetch · destroy -y
+```
+
+| Model (`./vastbench models`) | Engine | Weights | Min VRAM | Default cards | Disk |
+| :--- | :--- | ---: | ---: | :--- | ---: |
+| `qwen3.8-27b-q4k` (default) | ollama | 16.8 GB | 24 GB | RTX 3090, RTX 4090 | 40 GB |
+| `bielik-11b-q4km` | ollama | 6.7 GB | 16 GB | any ≥16 GB | 30 GB |
+| `bielik-4.5b-q8` | ollama | 5.1 GB | 12 GB | any ≥12 GB | 25 GB |
+| `bielik-1.5b-q8` | ollama | 1.7 GB | 10 GB | any ≥10 GB | 25 GB |
+| `qwen3.8-27b-fp8` | vllm | 27.8 GB | 46 GB, Ada/Hopper | any compatible | 90 GB |
+| `qwen3.8-27b-bf16` | vllm | 55.6 GB | 80 GB | any compatible | 130 GB |
+
+Models can be given as a name, a list number, or a unique prefix (`bielik-1.5`). Cards can be given
+as `4090`, `RTX_4090`, a number from `cards`, or `any`. A card that is too small for the model, or a
+disk below download size + 10 GB, is rejected before anything is rented. Choices made in the CLI win over
+`vast/.env`. Add models in `vast/models.py`.
+
+The CLI only chooses what to run; the bash scripts below do the renting, polling and cleanup. They can
+still be called directly:
+
 ```bash
 ./vast/bench.sh ollama                  # cheapest 3090/4090 (on-demand), full benchmark
 ./vast/bench.sh ollama --quick          # ~2-minute smoke run: check the pipeline first
