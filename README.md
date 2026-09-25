@@ -177,7 +177,7 @@ Every setting lives in `vast/.env.example`, with its default and a comment. The 
 
 | Setting | Default | Effect |
 | :--- | :--- | :--- |
-| `GPU_NAME` | – | Pin one card (e.g. `RTX_4090`) so speed numbers are comparable across runs |
+| `GPU_NAME` / `VLLM_GPU_NAME` | – | Pin one card (e.g. `RTX_4090` / `L40S`) so speed numbers are comparable across runs |
 | `INTERRUPTIBLE` | `0` | `1` = interruptible bid instead of on-demand |
 | `MAX_HOURS` / `MAX_RUN_USD_*` | `3` / `$3`, `$6` | Hard limits |
 | `VLLM_PRESET` | `fp8` | `bf16` = 80 GB reference run |

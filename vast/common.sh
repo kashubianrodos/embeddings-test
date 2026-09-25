@@ -138,7 +138,8 @@ resolve_config() {
         DOWNLOAD_GB="${VLLM_DOWNLOAD_GB:-72}" ;;
       *) die "VLLM_PRESET must be fp8 or bf16 (got '$PRESET')" ;;
     esac
-    [ -n "$GPU_NAME" ] && GPU_FILTER="$GPU_FILTER gpu_name=$GPU_NAME"
+    # GPU_NAME is for Ollama (24 GB cards); vLLM has its own pin so one .env serves both modes
+    [ -n "${VLLM_GPU_NAME:-}" ] && GPU_FILTER="$GPU_FILTER gpu_name=$VLLM_GPU_NAME"
     VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-16384}"
     VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.92}"
     VLLM_TP="${VLLM_TP:-}"
