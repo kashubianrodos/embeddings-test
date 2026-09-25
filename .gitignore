@@ -1,0 +1,6 @@
+venv/
+output/
+output_vast/
+vast/.instance_id
+vast/.instance_mode
+__pycache__/

@@ -55,6 +55,11 @@ python scripts/speed_test.py
 
 Reports land in `output/` as timestamped Markdown files.
 
+## Generative LLM tests (vast.ai)
+
+See [LLM_BENCHMARK.md](LLM_BENCHMARK.md) for speed, load and EN↔PL translation-quality
+tests of `huihui-ai/Huihui-Qwen3.8-27B-abliterated` on rented vast.ai GPUs.
+
 ## Interpreting results
 
 - **Speed**: lower total duration = better for real-time / high-throughput use.
