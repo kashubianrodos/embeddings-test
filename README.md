@@ -210,6 +210,35 @@ The `$/h` figure depends on the billing type:
 
 A cheap host with a slow or expensive link can lose to a slightly pricier one that downloads 20–44 GB much faster.
 
+### Simulating the ASUS Ascent GX10 (NVIDIA GB10, 128 GB, 1 TB SSD)
+
+The GX10 can't realistically be rented: GB10 hosts on vast.ai are rare and arm64-only. So `--simulate gx10`
+benchmarks on a normal rented card and then **projects** the numbers onto the GX10:
+
+```bash
+./vastbench bench qwen3.8-27b-q4k --simulate gx10   # run + gx10_projection.md in output_vast/<id>/
+./vastbench project 52613296                        # project a run you already have
+./vastbench cards bielik-11b -s gx10                # marks cards with GX10-like bandwidth (e.g. L4)
+```
+
+- **Before renting**, it checks that the model fits in the GX10's ~119 GB usable unified memory and on its 1 TB SSD.
+- **Decode** on GB10 is limited by memory bandwidth (273 GB/s spec, ~205 GB/s achievable with llama.cpp). The
+  projection is the slower of two times: weights ÷ that bandwidth, and the proxy's compute time scaled by the
+  compute ratio.
+- **Prefill** is compute-bound, so it's scaled by dense tensor throughput. That's INT8 for GGUF and FP8/BF16 for
+  vLLM; GB10 does ~208 INT8/FP8 and ~100 BF16.
+- **Quality** results carry over unchanged, since the weights are the same.
+- **Checked against a real RTX 3090 run** of `qwen3.8-27b-q4k`. The projection gives 12.2 tok/s decode and 811 tok/s
+  prefill; published GB10 measurements of the same model are 11.6 and 838. The report shows the published numbers
+  next to the projection wherever they exist.
+
+| Model | Projected GX10 decode (tok/s) |
+| :--- | ---: |
+| qwen3.8-27b-q4k | ~12 |
+| bielik-11b-q4km | ~30 |
+| bielik-4.5b-q8 | ~40 |
+| bielik-1.5b-q8 | ~100–120 (small models can be overhead-bound) |
+
 ### Configuration
 
 Every setting lives in `vast/.env.example`, with its default and a comment. The most useful ones:
