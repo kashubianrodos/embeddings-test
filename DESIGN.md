@@ -78,6 +78,7 @@ There is no daemon and no open port apart from SSH. Each poll is one SSH call th
 | # | Decision | Why | Rejected |
 | :- | :--- | :--- | :--- |
 | Q8 | Offers are ranked by **estimated total run cost** (section 4) by `vast/vast_tool.py rank`, called from `launch.sh`. | `-o dph` alone ranks by a price that counts only 5 GB of storage and ignores download time and bandwidth price. | Sorting by `dph`, which was the previous behaviour. |
+| – | A host is judged by **measured** throughput, not the advertised one: a probe before setup (`MIN_NET_MBPS`=150) and a watchdog during the download (`MIN_PULL_MBPS`=80). A slow host is replaced automatically (`HOST_RETRIES`=2). | Run 4: a host advertising 1342 Mb/s delivered about 10 Mb/s from HF. Replacing it after 2 minutes costs cents; waiting cost an hour. | Trusting `inet_down`; failing the whole run on a slow host. |
 | – | Offers are limited to Europe by default (`REGION=europe`: 2-letter codes from vast's `geolocation`; `eu`, `any` or an explicit list also work). | You asked for European hosts: European hosts mean lower latency to a European workstation for SSH and result fetches, and keep the machine in European jurisdictions. The ranker still picks the cheapest run within the region. | Worldwide search, the previous behaviour, which picked US and Asian hosts. |
 | Q3 (revised after two real runs) | `--interruptible` / `--on-demand` flags, **on-demand by default for both modes**. Originally Ollama defaulted to interruptible. Both real runs were then stopped by vast within 2.5–4.5 min. The second time, the bid ($0.129) was still above the current `min_bid` ($0.093), so an on-demand renter probably took the GPU. For a job of about 1 h, on-demand costs about $0.05 more and isn't lost halfway. | Interruptible is about 60% cheaper. Preemption costs a re-download: minutes for Ollama's 17 GB, more for vLLM's 28–56 GB, where on-demand is safer. | Always on-demand, as before. |
 | Q9 | The bid is `min_bid × 1.25` (`BID_MULTIPLIER`). | A bid just above the floor gets outbid within minutes; 1.25× buys some stability for little money. | A fixed dollar bid. |
@@ -158,6 +159,16 @@ can't take the container or sshd down with it.
   instead of breaking bash.
 - `run_limited` must not use a bare `wait` under `set -e`: a killed or failed command would silently exit the
   caller.
+
+**Lesson from real run 4** (machine 78080, Yunnan CN, before `REGION` existed): the host advertised
+1342 Mb/s. It delivered about 35 Mb/s for the Docker image and the Ollama install, and 0.1–3 MB/s from
+Hugging Face. `ollama pull` gave up after 62 min at 11% ("max retries exceeded: EOF") and the run cost $0.23
+for nothing. The advertised `inet_down` can't be trusted, so setup now measures the real link first
+(`net_probe`: 200 MB range request to the model file on HF), then guards the download (`download_watchdog`:
+rate over 5-min windows while partial files exist). A slow host fails with the reason `slow_network`.
+`bench.sh` then fetches its logs, destroys it, adds its `machine_id` to `EXCLUDE_MACHINES`, and rents the next
+cheapest offer, up to `HOST_RETRIES` times inside the same `MAX_HOURS` budget. Progress bars are thinned to one
+line every 30 s; `setup.log` had been 5 MB.
 
 Two more checks now run before renting: `REPO_URL` must be readable anonymously (`git ls-remote`), and your account
 must have an SSH key.

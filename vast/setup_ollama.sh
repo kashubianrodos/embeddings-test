@@ -17,6 +17,12 @@ export OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_KEEP_ALIVE=1h
 export OLLAMA_MODELS="${OLLAMA_MODELS:-$W/ollama-models}"
 export OLLAMA_HOST=127.0.0.1:11434
 
+# Measure the real link to Hugging Face before spending ~10 min on installs.
+case "$MODEL" in
+  hf.co/*:*.gguf) R="${MODEL#hf.co/}"; check_network "https://huggingface.co/${R%%:*}/resolve/main/${R##*:}" huggingface.co ;;
+  *) echo "(no network probe: model is not an hf.co/<repo>:<file>.gguf reference)" ;;
+esac
+
 export DEBIAN_FRONTEND=noninteractive
 NEED=""
 for c in curl zstd pgrep; do command -v $c >/dev/null || NEED=1; done
@@ -33,7 +39,7 @@ WANT="${OLLAMA_VERSION:-0.34.4}"
 HAVE=$(ollama --version 2>/dev/null | awk '{print $NF}' | tail -n1 || true)
 if [ "$HAVE" != "$WANT" ]; then
   mark engine_download_start version="$WANT"
-  curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION="$WANT" sh
+  curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION="$WANT" sh 2>&1 | quiet_progress
 fi
 if ! pgrep -x ollama >/dev/null; then
   nohup ollama serve >> "$W/ollama.log" 2>&1 &
@@ -43,7 +49,14 @@ curl -sf localhost:11434/api/version >/dev/null || { tail -n 50 "$W/ollama.log";
 mark engine_ready version="$(ollama --version 2>/dev/null | awk '{print $NF}' | tail -n1)"
 
 mark download_start
-ollama pull "$MODEL"
+mkdir -p "$OLLAMA_MODELS"
+ollama pull "$MODEL" > >(quiet_progress) 2>&1 &
+PULL=$!
+download_watchdog "$OLLAMA_MODELS" "$PULL"
+if ! wait "$PULL"; then
+  [ "$(cat "$W/SETUP_FAILED" 2>/dev/null)" = slow_network ] && fail_reason slow_network "model download too slow"
+  echo "ollama pull failed"; tail -n 20 "$W/ollama.log"; exit 1
+fi
 mark download_done bytes="$(dir_bytes "$OLLAMA_MODELS")"
 
 # The name Ollama lists can differ in case/format from what we pulled; use the listed one.

@@ -133,6 +133,12 @@ What happens:
    - the container **exits** on its own. That is a crash, not a preemption.
    - the machine is running but has no SSH for `SSH_WAIT_MIN` (10 min).
    - it is still loading after `LOAD_WAIT_MIN` (20 min).
+
+   One case is retried instead of stopping: a **host that is too slow**. Setup measures the real
+   download speed from Hugging Face before installing anything, then watches the model download.
+   Below `MIN_NET_MBPS` (150) at the start, or `MIN_PULL_MBPS` (80) during the download, the host is
+   destroyed and the next cheapest offer is rented instead (up to `HOST_RETRIES`=2 times), never the same
+   machine again.
 5. **Benchmark.** `vast/run_llm_bench.sh` runs on the instance under `nohup`, so a dropped SSH connection doesn't
    kill it. If an interruptible instance is preempted mid-run, the script waits up to `OUTBID_WAIT_MIN` (5 min) for
    it to resume, then reruns the benchmark once.
@@ -245,6 +251,9 @@ Shared flags: `--backend ollama|openai --model … --base-url … --think --num-
   or exclude the host with `EXTRA_QUERY='machine_id!=<id>'`.
 - **"no SSH for 10 min"**: check that your key is registered with `vastai show ssh-keys`.
 - **"ahead of its upstream"**: run `git push`. The instance can only run pushed code.
+- **"Host … is too slow" / "Tried N hosts, all too slow"**: the machine's real link to Hugging Face was far
+  below its advertised speed. It is replaced automatically. If every host in your `REGION` is slow, try
+  another region or lower `MIN_NET_MBPS`.
 - **"No usable offer"**: loosen the filters. Try `REGION=any` (or a wider list),  `MAX_INET_DOWN_COST`, `MIN_INET_DOWN_*`, `EXTRA_QUERY`, a different
   `GPU_NAME`, or `--on-demand`.
 - **"Cheapest run is estimated at … > MAX_RUN_USD"**: raise the cap in `vast/.env` or relax the filters.

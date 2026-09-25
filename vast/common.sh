@@ -108,6 +108,10 @@ resolve_config() {
   GPU_NAME="${GPU_NAME:-}"
   SSH_WAIT_MIN="${SSH_WAIT_MIN:-10}"
   FETCH_TIMEOUT="${FETCH_TIMEOUT:-180}"
+  MIN_NET_MBPS="${MIN_NET_MBPS:-150}"      # measured on the instance before installing anything
+  MIN_PULL_MBPS="${MIN_PULL_MBPS:-80}"     # sustained during the model download (5-min windows)
+  HOST_RETRIES="${HOST_RETRIES:-2}"        # slow host → destroy and try the next offer, this many times
+  EXCLUDE_MACHINES="${EXCLUDE_MACHINES:-}" # comma list of vast machine_ids never to rent
 
   if [ "$MODE" = ollama ]; then
     INTERRUPTIBLE="${INTERRUPTIBLE:-0}"   # 2/2 interruptible runs were stopped within 5 min (DESIGN Q3)
@@ -166,6 +170,7 @@ resolve_config() {
   REGION_CODES=$(region_codes "$REGION")
   QUERY="num_gpus=1 $GPU_FILTER reliability>$MIN_RELIABILITY inet_down>=$MIN_INET_DOWN disk_space>=$DISK_GB cuda_vers>=$CUDA_MIN rentable=true"
   [ -n "$REGION_CODES" ] && QUERY="$QUERY geolocation in [$REGION_CODES]"
+  [ -n "$EXCLUDE_MACHINES" ] && QUERY="$QUERY machine_id notin [$EXCLUDE_MACHINES]"
   [ -n "$EXTRA_QUERY" ] && QUERY="$QUERY $EXTRA_QUERY"
   return 0
 }
@@ -176,6 +181,7 @@ remote_env_b64() {
   local k v
   {
     for k in BENCH_MODE BENCH_LABEL LLM_MODEL LLM_REVISION REPO_URL REPO_BRANCH REPO_COMMIT QUICK HF_TOKEN \
+             MIN_NET_MBPS MIN_PULL_MBPS \
              OLLAMA_VERSION OLLAMA_NUM_PARALLEL OLLAMA_CONTEXT_LENGTH OLLAMA_KV_CACHE_TYPE \
              VLLM_MAX_MODEL_LEN VLLM_GPU_MEM_UTIL VLLM_TP VLLM_EXTRA_ARGS; do
       v="${!k-}"

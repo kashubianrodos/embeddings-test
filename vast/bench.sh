@@ -48,28 +48,27 @@ esac
 
 [ -f "$STATE_ID" ] && die "An instance is already tracked in $STATE_ID ($(cat "$STATE_ID")). Destroy it first: ./vast/destroy.sh"
 OUTCOME="interrupted"; ID=""
+# fetch logs + destroy the current instance (never blocks, never aborts)
+cleanup_instance() {
+  [ -n "$ID" ] || { [ -f "$STATE_ID" ] && ID=$(cat "$STATE_ID"); }
+  [ -n "$ID" ] || return 0
+  log "Cleaning up instance $ID (outcome: $OUTCOME) — fetching logs (max ${FETCH_TIMEOUT}s), then destroying"
+  OUTCOME="$OUTCOME" run_limited "$FETCH_TIMEOUT" "$VAST_DIR/fetch_results.sh" "$ID" || log "Fetching logs failed or timed out — destroying anyway"
+  run_limited 240 "$VAST_DIR/destroy.sh" -y "$ID" || printf '\n🚨 Destroy did not complete for instance %s — check https://cloud.vast.ai/instances/ NOW.\n' "$ID" >&2
+  ID=""
+}
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   set +e
-  [ -n "$ID" ] || { [ -f "$STATE_ID" ] && ID=$(cat "$STATE_ID"); }
-  if [ -n "$ID" ]; then
-    log "Cleaning up instance $ID (outcome: $OUTCOME) — fetching logs (max ${FETCH_TIMEOUT}s), then destroying"
-    OUTCOME="$OUTCOME" run_limited "$FETCH_TIMEOUT" "$VAST_DIR/fetch_results.sh" "$ID" || log "Fetching logs failed or timed out — destroying anyway"
-    run_limited 240 "$VAST_DIR/destroy.sh" -y "$ID" || printf '\n🚨 Destroy did not complete for instance %s — check https://cloud.vast.ai/instances/ NOW.\n' "$ID" >&2
-  fi
+  cleanup_instance
   exit $rc
 }
 # Armed BEFORE renting: if launch.sh fails after the instance exists, it is still destroyed.
 trap cleanup EXIT
 trap 'OUTCOME=interrupted; exit 130' INT TERM
 
-OUTCOME="launch_failed"
-"$VAST_DIR/launch.sh" "$@"
-[ -f "$STATE_ID" ] || { OUTCOME="not_rented"; exit 0; }   # user answered "no"
-ID=$(cat "$STATE_ID")
-OUTCOME="interrupted"
-DEADLINE=$(( $(date +%s) + $(secs_from_hours "$MAX_HOURS") ))
+DEADLINE=$(( $(date +%s) + $(secs_from_hours "$MAX_HOURS") ))   # for the whole run, all hosts
 
 remote_state() {
   # shellcheck disable=SC2016  # expands on the instance, not here
@@ -89,6 +88,14 @@ show_vast_logs() {  # why did the container die / never get SSH? (API, works wit
   run_limited 45 vast logs "$ID" --tail 25 2>&1 | sed 's/^/    /' >&2 || true
 }
 
+# One host: rent → setup → benchmark. Sets RETRY=1 (and returns) when the host is too slow
+# to be worth keeping; anything else fatal goes through die → EXIT trap.
+run_attempt() {
+OUTCOME="launch_failed"; RETRY=0
+"$VAST_DIR/launch.sh" "$@"
+[ -f "$STATE_ID" ] || { OUTCOME="not_rented"; exit 0; }   # user answered "no"
+ID=$(cat "$STATE_ID")
+OUTCOME="interrupted"
 BENCH_STARTS=0; DOWN_SINCE=""; NOSSH_SINCE=""; LOADING_SINCE=""; LAST=""; LAST_ST=""
 LOAD_WAIT_MIN=${LOAD_WAIT_MIN:-20}
 while :; do
@@ -140,8 +147,12 @@ while :; do
   fi
   case "$RS" in
     SETUP_FAILED)
-      OUTCOME="setup_failed"
+      REASON=$(run_limited 30 remote "$ID" 'cat /workspace/SETUP_FAILED' 2>/dev/null | head -n1 || true)
       run_limited 60 remote "$ID" 'tail -n 25 /workspace/setup.log /workspace/onstart.log' 2>/dev/null || true
+      if [ "$REASON" = slow_network ]; then
+        OUTCOME="slow_network"; event slow_network; RETRY=1; return 0
+      fi
+      OUTCOME="setup_failed"
       die "Setup failed on the instance (logs will be in output_vast/$ID/)." ;;
     READY)
       [ "$BENCH_STARTS" = 0 ] && event ready
@@ -152,7 +163,7 @@ while :; do
       run_limited 60 remote "$ID" 'cd /workspace/embeddings-test && nohup bash vast/run_llm_bench.sh >> /workspace/bench.log 2>&1 < /dev/null &' \
         || log "Could not start the benchmark over SSH; will retry"
       ;;
-    BENCH_DONE)   event bench_done; OUTCOME="success"; log "Benchmark finished."; break ;;
+    BENCH_DONE)   event bench_done; OUTCOME="success"; log "Benchmark finished."; return 0 ;;
     BENCH_FAILED)
       OUTCOME="bench_failed"
       run_limited 60 remote "$ID" 'tail -n 30 /workspace/bench.log' 2>/dev/null || true
@@ -160,5 +171,23 @@ while :; do
     *) ;;  # SETUP / BENCH_RUNNING / UNREACHABLE: keep waiting
   esac
   sleep "$POLL"
+done
+}
+
+HOST=1
+while :; do
+  run_attempt "$@"
+  [ "$RETRY" = 1 ] || break
+  # slow host: keep its logs, destroy it, never pick it again, try the next cheapest offer
+  M=$(python3 "$TOOL" get "$STATE_META" machine_id 2>/dev/null || true)
+  log "Host $HOST (machine ${M:-?}) is too slow to download the model — replacing it"
+  cleanup_instance
+  if [ "$HOST" -gt "$HOST_RETRIES" ]; then
+    OUTCOME="slow_network"; die "Tried $HOST hosts, all too slow (MIN_NET_MBPS=$MIN_NET_MBPS). Try another REGION or lower MIN_NET_MBPS."
+  fi
+  [ -n "$M" ] && EXCLUDE_MACHINES="${EXCLUDE_MACHINES:+$EXCLUDE_MACHINES,}$M"
+  export EXCLUDE_MACHINES
+  HOST=$((HOST + 1))
+  log "Retrying on another host ($HOST of $((HOST_RETRIES + 1))), excluding machines: $EXCLUDE_MACHINES"
 done
 # EXIT trap: fetch results → run_summary.md → destroy

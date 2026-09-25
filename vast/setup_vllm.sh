@@ -31,15 +31,29 @@ mark packages_done
 "$PY" -c "import vllm; print('vLLM', vllm.__version__)"
 mark engine_ready version="$("$PY" -c 'import vllm; print(vllm.__version__)')"
 
-# Separate download step so the summary can report real download throughput.
+# Probe the real link with the first weight shard, then download (timed separately so the
+# summary can report real throughput) under a stall watchdog.
+SHARD=$(MODEL="$MODEL" REV="$REV" "$PY" -c '
+import os
+from huggingface_hub import list_repo_files
+fs = sorted(f for f in list_repo_files(os.environ["MODEL"], revision=os.environ["REV"]) if f.endswith(".safetensors"))
+print(fs[0] if fs else "")' 2>/dev/null || true)
+[ -n "$SHARD" ] && check_network "https://huggingface.co/$MODEL/resolve/$REV/$SHARD" huggingface.co
 mark download_start
-MODEL="$MODEL" REV="$REV" "$PY" - <<'PY'
+mkdir -p "$HF_HOME"
+MODEL="$MODEL" REV="$REV" "$PY" - <<'PY' &
 import os
 from huggingface_hub import snapshot_download
 p = snapshot_download(os.environ["MODEL"], revision=os.environ["REV"],
                       ignore_patterns=["*.gguf", "*.bin", "*.pt", "*.pth", "*.onnx", "original/*"])
 print("weights in", p)
 PY
+DL=$!
+download_watchdog "$HF_HOME" "$DL"
+if ! wait "$DL"; then
+  [ "$(cat "$W/SETUP_FAILED" 2>/dev/null)" = slow_network ] && fail_reason slow_network "weight download too slow"
+  echo "weight download failed"; exit 1
+fi
 mark download_done bytes="$(dir_bytes "$HF_HOME")"
 
 if ! pgrep -f "vllm serve" >/dev/null; then
