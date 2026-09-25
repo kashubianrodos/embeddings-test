@@ -2,7 +2,8 @@
 # One command, whole run, always cleaned up:
 #   rent cheapest run → wait for READY → benchmark → fetch logs+reports → DESTROY
 #
-#   ./vast/bench.sh ollama|vllm [--interruptible|--on-demand] [--quick] [--yes]
+#   ./vast/bench.sh ollama|vllm [--preset NAME] [--interruptible|--on-demand] [--quick] [--yes]
+#     ./vast/bench.sh ollama --preset bielik-1.5b     # smallest Bielik instead of Qwen3.8-27B
 #
 # The instance is destroyed on every exit path (success, failure, Ctrl-C, MAX_HOURS, container
 # exited, no SSH for SSH_WAIT_MIN, preempted longer than OUTBID_WAIT_MIN) — always after trying

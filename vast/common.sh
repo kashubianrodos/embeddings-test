@@ -116,23 +116,42 @@ resolve_config() {
   if [ "$MODE" = ollama ]; then
     INTERRUPTIBLE="${INTERRUPTIBLE:-0}"   # 2/2 interruptible runs were stopped within 5 min (DESIGN Q3)
     MAX_RUN_USD="${MAX_RUN_USD_OLLAMA:-3}"
-    BENCH_HOURS="${BENCH_HOURS_OLLAMA:-0.75}"
     MIN_INET_DOWN="${MIN_INET_DOWN_OLLAMA:-500}"
+    PRESET="${OLLAMA_PRESET:-q4k}"
+    case "$PRESET" in
+      q4k|qwen|qwen-q4k) PRESET="q4k" ;;
+      bielik|bielik-1.5b|bielik-1.5b-q8)
+        PRESET="bielik-1.5b"
+        # The OLLAMA_* model/size settings describe the Qwen preset; don't let a copied .env
+        # silently turn a Bielik run back into a 17 GB Qwen download.
+        for v in OLLAMA_LLM_MODEL OLLAMA_DOWNLOAD_GB OLLAMA_DISK_GB OLLAMA_GPU_NAMES BENCH_HOURS_OLLAMA; do
+          if [ -n "${!v:-}" ]; then log "note: $v from vast/.env applies to the q4k preset only — ignored for $PRESET"; unset "$v"; fi
+        done ;;
+      *) die "OLLAMA_PRESET must be q4k or bielik-1.5b (got '$PRESET')" ;;
+    esac
     # vast's own base image: built for SSH launch mode (sshd, onstart). Ollama is installed
     # at a pinned version by setup_ollama.sh (ollama/ollama failed in SSH mode — DESIGN.md Q7).
     IMAGE="${OLLAMA_IMAGE:-vastai/base-image:stock-ubuntu24.04-py312-2026-09-07}"
     OLLAMA_VERSION="${OLLAMA_VERSION:-0.34.4}"
     CUDA_MIN="${OLLAMA_CUDA_MIN:-12.4}"
-    DISK_GB="${OLLAMA_DISK_GB:-40}"
-    DOWNLOAD_GB="${OLLAMA_DOWNLOAD_GB:-22}"
-    LLM_MODEL="${LLM_MODEL:-${OLLAMA_LLM_MODEL:-hf.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf}}"
+    if [ "$PRESET" = bielik-1.5b ]; then
+      # Smallest generative Bielik: speakleash/Bielik-1.5B-v3.0-Instruct (Apache-2.0, llama arch,
+      # 8k context). Only Q8_0 (1.7 GB) and fp16 GGUFs exist; Q8_0 is ~lossless vs fp16.
+      DISK_GB=25; DOWNLOAD_GB=5; BENCH_HOURS=0.4
+      LLM_MODEL="${LLM_MODEL:-hf.co/speakleash/Bielik-1.5B-v3.0-Instruct-GGUF:Bielik-1.5B-v3.0-Instruct.Q8_0.gguf}"
+    else
+      DISK_GB="${OLLAMA_DISK_GB:-40}"
+      DOWNLOAD_GB="${OLLAMA_DOWNLOAD_GB:-22}"
+      BENCH_HOURS="${BENCH_HOURS_OLLAMA:-0.75}"
+      LLM_MODEL="${LLM_MODEL:-${OLLAMA_LLM_MODEL:-hf.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf}}"
+    fi
     LLM_REVISION=""
     OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-4}"
     OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
     OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-f16}"
     if [ -n "$GPU_NAME" ]; then GPU_FILTER="gpu_name=$GPU_NAME"
+    elif [ "$PRESET" = bielik-1.5b ]; then GPU_FILTER="gpu_ram>=10"   # 1.7 GB model: any ≥10 GB card
     else GPU_FILTER="gpu_name in [${OLLAMA_GPU_NAMES:-RTX_3090,RTX_4090}]"; fi
-    PRESET="q4k"
   else
     INTERRUPTIBLE="${INTERRUPTIBLE:-0}"
     MAX_RUN_USD="${MAX_RUN_USD_VLLM:-6}"

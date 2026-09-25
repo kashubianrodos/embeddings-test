@@ -3,7 +3,8 @@
 # checks it against the budget, and rents it. Setup then starts by itself (onstart.sh).
 # Normally called by ./vast/bench.sh; run it directly only for step-by-step debugging.
 #
-#   ./vast/launch.sh ollama|vllm [--interruptible|--on-demand] [--yes] [--quick]
+#   ./vast/launch.sh ollama|vllm [--preset NAME] [--interruptible|--on-demand] [--yes] [--quick]
+#     presets: ollama → q4k (default, Qwen3.8-27B Q4_K) | bielik-1.5b;  vllm → fp8 (default) | bf16
 #
 # All knobs: vast/.env.example.  Why: DESIGN.md.
 set -euo pipefail
@@ -17,7 +18,10 @@ while [ $# -gt 0 ]; do
     --on-demand)     INTERRUPTIBLE=0 ;;
     --yes|-y)        ASSUME_YES=1 ;;
     --quick)         QUICK=1 ;;
-    *) die "unknown option $1 (usage: $0 ollama|vllm [--interruptible|--on-demand] [--yes] [--quick])" ;;
+    --preset)        shift; [ -n "${1:-}" ] || die "--preset needs a name"
+                     if [ "$MODE_ARG" = vllm ]; then VLLM_PRESET=$1; else OLLAMA_PRESET=$1; fi ;;
+    --preset=*)      if [ "$MODE_ARG" = vllm ]; then VLLM_PRESET=${1#--preset=}; else OLLAMA_PRESET=${1#--preset=}; fi ;;
+    *) die "unknown option $1 (usage: $0 ollama|vllm [--preset NAME] [--interruptible|--on-demand] [--yes] [--quick])" ;;
   esac
   shift
 done

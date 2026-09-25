@@ -83,6 +83,7 @@ There are two modes. Run them as two separate, cheap runs:
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `ollama` | "How does it feel for one user?" and "Did quantization or abliteration hurt quality?" | GGUF Q4_K, 16.8 GB | 1× RTX 3090 or RTX 4090 (24 GB) | on-demand | ~$0.2–0.5 |
 | `vllm` | "How many users can one GPU serve?" | FP8, 28 GB (`VLLM_PRESET=fp8`) | 1× 48 GB Ada or Hopper (L40S, L40, RTX 6000 Ada, H100) | on-demand | ~$1–1.5 |
+| `ollama --preset bielik-1.5b` | Same questions, for the smallest Polish model: [Bielik-1.5B-v3.0-Instruct](https://huggingface.co/speakleash/Bielik-1.5B-v3.0-Instruct) | GGUF Q8_0, 1.7 GB | any ≥10 GB card | on-demand | ~$0.05–0.15 |
 | `vllm` + `VLLM_PRESET=bf16` | Full-precision reference only | BF16, 56 GB | 1× 80 GB (A100, H100) | on-demand | ~$2–4 |
 
 \*These are estimates from September 2026 market prices. Every run prints its real estimate before renting and its
@@ -114,6 +115,7 @@ actual cost afterwards (`run_summary.md`).
 ./vast/bench.sh ollama --quick          # ~2-minute smoke run: check the pipeline first
 ./vast/bench.sh vllm                    # FP8 on a 48 GB Ada/Hopper card, on-demand
 VLLM_PRESET=bf16 ./vast/bench.sh vllm   # BF16 reference on 80 GB
+./vast/bench.sh ollama --preset bielik-1.5b   # smallest Bielik (1.5B, Q8_0) for comparison
 ```
 
 Flags: `--interruptible` bids for a cheaper machine that vast may stop at any time (see Troubleshooting); `--on-demand` is the default. `--quick` runs the smoke-size
@@ -187,7 +189,8 @@ Every setting lives in `vast/.env.example`, with its default and a comment. The 
 | `GPU_NAME` / `VLLM_GPU_NAME` | – | Pin one card (e.g. `RTX_4090` / `L40S`) so speed numbers are comparable across runs |
 | `INTERRUPTIBLE` | `0` | `1` = interruptible bid instead of on-demand |
 | `MAX_HOURS` / `MAX_RUN_USD_*` | `3` / `$3`, `$6` | Hard limits |
-| `VLLM_PRESET` | `fp8` | `bf16` = 80 GB reference run |
+| `OLLAMA_PRESET` | `q4k` | `bielik-1.5b` = speakleash Bielik-1.5B-v3.0-Instruct Q8_0 (CLI: `--preset bielik-1.5b`) |
+| `VLLM_PRESET` | `fp8` | `bf16` = 80 GB reference run (CLI: `--preset bf16`) |
 | `OLLAMA_NUM_PARALLEL` / `OLLAMA_CONTEXT_LENGTH` | `4` / `8192` | Ollama concurrency slots and context |
 | `VLLM_MAX_MODEL_LEN` / `VLLM_EXTRA_ARGS` | `16384` / `--language-model-only --kv-cache-dtype fp8 --reasoning-parser qwen3` | vLLM server |
 | `EXTRA_QUERY` | – | Extra vast filters, e.g. `geolocation in [DE,NL,PL]` |
